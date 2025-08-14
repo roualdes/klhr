@@ -1,0 +1,3 @@
+#DISBATCH PREFIX ( cd experiments/ar1/ ; source ../../experiment_setup ; python ../../experiment_ar1.py -M 10_000 -w 5_000
+#DISBATCH SUFFIX ) &> ${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log
+ --windowsize 25 --windowscale 2 -s True --random True -J 2 -r 0 klhrsinh

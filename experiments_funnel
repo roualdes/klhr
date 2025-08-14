@@ -1,0 +1,3 @@
+#DISBATCH PREFIX ( cd experiments/funnel/ ; source ../../experiment_setup ; python ../../experiment_funnel.py
+#DISBATCH SUFFIX ) &> ${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log
+ -M 10_000 klhrsinh

@@ -1,0 +1,76 @@
+import click
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+
+import bridgestan as bs
+from bsmodel import BSModel
+from klhr_sinh import KLHRSINH
+from klhr import KLHR
+
+@click.command()
+@click.option("-M", "--iterations", "M", type=int, default=2_000, help="number of iterations")
+@click.option("-w", "--warmup", "warmup", type=int, default=1_000, help="set value from which RMSEs are plot")
+@click.option("--windowsize", "windowsize", type=int, default=25, help="set window size")
+@click.option("--windowscale", "windowscale", type=int, default=2, help="set window scale")
+@click.option("-l", "--amnesia", "l", type=int, default=2, help="set the amnesia parameter for OnlinePCA")
+@click.option("-s", "--scaled", "scaled", type=bool, default=True, help="use scaled random directions")
+@click.option("-J", "J", type=int, default=2, help="number of eigenvectors")
+@click.option("--random", "random", type=bool, default=True, help="maintain a default random direction coordinate")
+@click.option("-r", "--replication", "rep", type=int, default=0, help="replication number for naming output files")
+@click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
+@click.argument("algorithm", type=str)
+def main(M, warmup, windowsize, windowscale, l, scaled, J, random, rep, verbose, algorithm):
+
+    bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
+
+    model = "earnings"
+    source_dir = Path(__file__).resolve().parent
+    bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
+                       data_file = source_dir / f"stan/{model}.json")
+
+    if algorithm == "klhr":
+        algo = KLHR(bs_model,
+                    warmup = warmup,
+                    windowsize = windowsize,
+                    windowscale = windowscale,
+                    J = J,
+                    scaled = scaled,
+                    random = random,
+                    l = l)
+    elif algorithm == "klhrsinh":
+        algo = KLHRSINH(bs_model,
+                        warmup = warmup,
+                        windowsize = windowsize,
+                        windowscale = windowscale,
+                        J = J,
+                        scaled = scaled,
+                        random = random,
+                        l = l)
+    else:
+        print(f"Unknown algorithm {algorithm}")
+        print("Available algorithms: klhr or klhrsinh")
+        sys.exit(0)
+
+    draws = algo.sample(M)
+    idx = np.arange(M)
+
+    fig, axs = plt.subplots(2, 2, figsize = (14, 6))
+    axs[0, 0].plot(idx, draws[:, 0])
+    axs[0, 0].set_ylabel(r"$\beta_0$")
+
+    axs[0, 1].plot(idx, draws[:, 1])
+    axs[0, 1].set_ylabel(r"$\beta_1$")
+
+    axs[1, 0].plot(idx, draws[:, 2])
+    axs[1, 0].set_ylabel(r"$\sigma$")
+
+    axs[1, 1].plot(idx, draws[:, 3])
+    axs[1, 1].set_ylabel(r"$s$")
+
+    plt.tight_layout()
+    plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{windowsize}_{windowscale}_{l}_{int(scaled)}_{J}_{int(random)}_{rep:0>2}.png")
+    plt.close()
+
+if __name__ == "__main__":
+    main()

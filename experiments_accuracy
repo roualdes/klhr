@@ -1,0 +1,3 @@
+#DISBATCH PREFIX ( cd experiments/accuracy/ ; source ../../experiment_setup ; python ../../experiment_accuracy.py
+#DISBATCH SUFFIX ) &> ${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log
+ -M 10_000 -w 1_000 klhrsinh

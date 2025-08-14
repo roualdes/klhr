@@ -1,0 +1,8 @@
+J=1
+experiment="funnel"
+output="experiments/$experiment"
+script="experiments_$experiment"
+
+mkdir -p "$output"
+
+disbatch -s localhost:$J --retry "$script"
