@@ -215,3 +215,5 @@ stan/*
 *.txt
 *.sh
 *.out
+.virtual_documents/
+*.png

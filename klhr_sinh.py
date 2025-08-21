@@ -50,10 +50,10 @@ class KLHRSINH(MCMCBase):
         self.minimization_failure_rate = 0
 
         # constants
-        self._sqrt2 = np.sqrt(2)
+        self._invsqrtpi = 1 / np.sqrt(np.pi)
         self._log2 = np.log(2)
         self._log2pi = np.log(2 * np.pi)
-        self._invsqrtpi = 1 / np.sqrt(np.pi)
+        self._sqrt2 = np.sqrt(2)
 
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
@@ -171,6 +171,24 @@ class KLHRSINH(MCMCBase):
         grad[3] = -taed * invd
         return grad
 
+    def _L_normal(self, eta, rho):
+        m, s, _, _ = self._unpack(eta)
+        out = 0.0
+        grad = np.zeros(4)
+        for xn, wn in zip(self.x, self.w):
+            y = self._sqrt2 * s * xn + m
+            xi = self._to_rho(y, rho, self.theta)
+            logp, grad_logp = self._logp_grad(xi)
+            out += wn * logp
+            w_grad_logp_rho = wn * grad_logp.dot(rho)
+            grad[0] += w_grad_logp_rho
+            grad[1] += w_grad_logp_rho * s * xn * self._sqrt2
+        out *= self._invsqrtpi
+        out += eta[1]
+        grad[1] *= self._invsqrtpi
+        grad[1] += 1
+        return -out, -grad
+
     def _L(self, eta, rho):
         out = 0.0
         grad = np.zeros(4)
@@ -191,12 +209,18 @@ class KLHRSINH(MCMCBase):
         return out, grad
 
     def fit(self, rho):
-        o = minimize(self._L,
+        o = minimize(self._L_normal,
                      self.rng.normal(size = 4) * self._initscale,
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
-        self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
+        o = minimize(self._L,
+                     np.array([o.x[0], o.x[1], 0, 0]),
+                     args = (rho,),
+                     jac = True,
+                     method = "BFGS")
+        if self._draw > 0:
+            self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
         return o.x
 
     def _metropolis_step(self, eta, rho):

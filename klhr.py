@@ -47,8 +47,8 @@ class KLHR(MCMCBase):
         self.minimization_failure_rate = 0
 
         # constants
-        self.invsqrtpi = 1 / np.sqrt(np.pi)
-        self.sqrt2 = np.sqrt(2)
+        self._invsqrtpi = 1 / np.sqrt(np.pi)
+        self._sqrt2 = np.sqrt(2)
 
     def _unpack(self, eta):
         m = eta[0]
@@ -68,16 +68,16 @@ class KLHR(MCMCBase):
         out = 0.0
         grad = np.zeros(2)
         for xn, wn in zip(self.x, self.w):
-            y = self.sqrt2 * s * xn + m
+            y = self._sqrt2 * s * xn + m
             xi = self._to_rho(y, rho, self.theta)
             logp, grad_logp = self._logp_grad(xi)
             out += wn * logp
             w_grad_logp_rho = wn * grad_logp.dot(rho)
             grad[0] += w_grad_logp_rho
-            grad[1] += w_grad_logp_rho * s * xn * self.sqrt2
-        out *= self.invsqrtpi
+            grad[1] += w_grad_logp_rho * s * xn * self._sqrt2
+        out *= self._invsqrtpi
         out += eta[1]
-        grad[1] *= self.invsqrtpi
+        grad[1] *= self._invsqrtpi
         grad[1] += 1
         return -out, -grad
 
@@ -88,7 +88,8 @@ class KLHR(MCMCBase):
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
-        self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
+        if self._draw > 0:
+            self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
         return o.x
 
     def _random_direction(self):
