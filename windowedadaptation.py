@@ -10,11 +10,12 @@ class WindowedAdaptation():
         self._calculate_windows()
 
     def _calculate_windows(self):
-        for w in range(self._warmup + 1):
-            if w == self._closewindow:
-                self._closures.append(w)
-                self._calculate_next_window()
-        self._num_windows = len(self._closures)
+        if self._warmup > self._windowsize:
+            for w in range(self._warmup + 1):
+                if w == self._closewindow:
+                    self._closures.append(w)
+                    self._calculate_next_window()
+            self._num_windows = len(self._closures)
 
     def _calculate_next_window(self):
         self._windowsize *= self._windowscale
@@ -25,6 +26,8 @@ class WindowedAdaptation():
             self._closewindow = nextclosewindow
 
     def window_closed(self, m):
+        if self._warmup < self._windowsize:
+            return False
         closed = m == self._closures[self._idx]
         if closed and self._idx < self._num_windows - 1:
             self._idx += 1

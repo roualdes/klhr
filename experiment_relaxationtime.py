@@ -14,13 +14,11 @@ from klhr import KLHR
 @click.option("--windowsize", "windowsize", type=int, default=25, help="set window size")
 @click.option("--windowscale", "windowscale", type=int, default=2, help="set window scale")
 @click.option("-l", "--amnesia", "l", type=int, default=2, help="set the amnesia parameter for OnlinePCA")
-@click.option("-s", "--scaled", "scaled", type=bool, default=True, help="use scaled random directions")
 @click.option("-J", "J", type=int, default=2, help="number of eigenvectors")
-@click.option("--random", "random", type=bool, default=True, help="maintain a default random direction coordinate")
 @click.option("-r", "--replication", "rep", type=int, default=0, help="replication number for naming output files")
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
 @click.argument("algorithm", type=str)
-def main(M, warmup, windowsize, windowscale, l, scaled, J, random, rep, verbose, algorithm):
+def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, algorithm):
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
@@ -35,8 +33,6 @@ def main(M, warmup, windowsize, windowscale, l, scaled, J, random, rep, verbose,
                     windowsize = windowsize,
                     windowscale = windowscale,
                     J = J,
-                    scaled = scaled,
-                    random = random,
                     l = l)
     elif algorithm == "klhrsinh":
         algo = KLHRSINH(bs_model,
@@ -44,8 +40,6 @@ def main(M, warmup, windowsize, windowscale, l, scaled, J, random, rep, verbose,
                         windowsize = windowsize,
                         windowscale = windowscale,
                         J = J,
-                        scaled = scaled,
-                        random = random,
                         l = l)
     else:
         print(f"Unknown algorithm {algorithm}")
@@ -69,7 +63,7 @@ def main(M, warmup, windowsize, windowscale, l, scaled, J, random, rep, verbose,
     axs[1, 1].set_ylabel(r"$s$")
 
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{windowsize}_{windowscale}_{l}_{int(scaled)}_{J}_{int(random)}_{rep:0>2}.png")
+    plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{windowsize}_{windowscale}_{l}_{J}_{rep:0>2}.png")
     plt.close()
 
 if __name__ == "__main__":

@@ -16,8 +16,7 @@ class KLHRSINH(MCMCBase):
                  initscale = 0.1,
                  warmup = 1_000, windowsize = 25, windowscale = 2,
                  tol = 1e-10, clip_trig = 600,
-                 clip_grad = 1e6, tol_grad = 1e12,
-                 random = True, scaled = True):
+                 clip_grad = 1e6, tol_grad = 1e12):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -32,18 +31,14 @@ class KLHRSINH(MCMCBase):
         self._mean = np.zeros(self.D)
         self._var = np.ones(self.D)
 
-        self._random = int(random)
-        self._Jr = self.J + self._random
-        self._scaled = scaled
-
         self._initscale = initscale
         self._windowedadaptation = WindowedAdaptation(warmup,
                                                       windowsize = windowsize,
                                                       windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
-        self._onlinepca = OnlinePCA(self.D, K = self._Jr - self._random, l = self.l)
-        self._eigvecs = np.zeros((self.D, self._Jr))
-        self._eigvals = np.ones(self._Jr)
+        self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
+        self._eigvecs = np.zeros((self.D, self.J + 1))
+        self._eigvals = np.ones(self.J + 1)
 
         self._draw = 0
         self.acceptance_probability = 0
@@ -57,7 +52,7 @@ class KLHRSINH(MCMCBase):
 
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
-        j = self.rng.choice(self._Jr, p = p)
+        j = self.rng.choice(self.J + 1, p = p)
         rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
         return rho / np.linalg.norm(rho)
 
@@ -234,7 +229,6 @@ class KLHRSINH(MCMCBase):
 
         accept = np.log(self.rng.uniform()) < np.minimum(0, a)
         if accept:
-            # print("accepted")
             self.theta = thetap
 
         d = accept - self.acceptance_probability
@@ -250,10 +244,10 @@ class KLHRSINH(MCMCBase):
 
         if self._windowedadaptation.window_closed(self._draw):
             self._mean = self._onlinemoments.mean()
-            if self._scaled: self._var = self._onlinemoments.var()
+            self._var = self._onlinemoments.var()
             self._onlinemoments.reset()
-            self._eigvecs[:, :self._Jr - self._random] = self._onlinepca.vectors()
-            self._eigvals[:self._Jr - self._random] = self._onlinepca.values()
+            self._eigvecs[:, :self.J] = self._onlinepca.vectors()
+            self._eigvals[:self.J] = self._onlinepca.values()
             self._onlinepca.reset()
         else:
             self._onlinemoments.update(theta)
