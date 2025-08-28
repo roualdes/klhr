@@ -95,17 +95,19 @@ def main(M, warmup, verbose, algorithm):
     plt.clf()
     plt.rc('axes', labelsize = 12)
 
-    plt.plot(mdx[warmup:], stats_klhr["rmse_mean"][warmup:], label="KLHR: mean",
+    origin = 10 ** 2
+
+    plt.plot(mdx[origin:], stats_klhr["rmse_mean"][origin:], label="KLHR: mean",
              linestyle = "dotted", color = "#0072B2", linewidth = 2)
-    plt.plot(mdx[warmup:], stats_klhr["rmse_var"][warmup:], label="KLHR: var",
+    plt.plot(mdx[origin:], stats_klhr["rmse_var"][origin:], label="KLHR: var",
              linestyle = (0, (1, 5)), color = "#D55E00", linewidth = 2)
 
-    plt.plot(mdx[warmup:], stats_mh["rmse_mean"][warmup:], label="MH: mean",
+    plt.plot(mdx[origin:], stats_mh["rmse_mean"][origin:], label="MH: mean",
              linestyle = "dashed", color = "#009E73", linewidth = 2)
-    plt.plot(mdx[warmup:], stats_mh["rmse_var"][warmup:], label="MH: var",
+    plt.plot(mdx[origin:], stats_mh["rmse_var"][origin:], label="MH: var",
              linestyle = (0, (5, 5)), color = "#F0E442", linewidth = 2)
 
-    plt.plot([warmup, M], [1 / np.sqrt(warmup), 1 / np.sqrt(M)],
+    plt.plot([origin, M], [1 / np.sqrt(origin), 1 / np.sqrt(M)],
              linestyle = "solid", color = "black", alpha = 0.2)
 
     plt.yscale('log')
@@ -114,17 +116,17 @@ def main(M, warmup, verbose, algorithm):
     plt.xlabel("iteration")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_rmse.png")
+    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_rmse.png")
 
     plt.clf()
     plt.rc('axes', labelsize = 12)
-    plt.hist(stats_klhr["log_density"][warmup:], histtype = "step", density = True, label = "KLHR")
-    plt.hist(stats_mh["log_density"][warmup:], histtype = "step", density = True, label = "MH")
-    plt.hist(log_density_iid[warmup:], histtype = "step", density = True, label = "iid")
+    plt.hist(stats_klhr["log_density"][origin:], histtype = "step", density = True, label = "KLHR")
+    plt.hist(stats_mh["log_density"][origin:], histtype = "step", density = True, label = "MH")
+    plt.hist(log_density_iid[origin:], histtype = "step", density = True, label = "iid")
     plt.xlabel("log_density")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_histogram_log_density.png")
+    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_histogram_log_density.png")
     plt.close()
 
 if __name__ == "__main__":

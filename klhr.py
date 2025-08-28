@@ -11,8 +11,7 @@ from windowedadaptation import WindowedAdaptation
 
 class KLHR(MCMCBase):
     def __init__(self, bsmodel, theta = None, seed = None,
-                 N = 16, K = 10, J = 2, l = 0,
-                 initscale = 0.1,
+                 N = 16, K = 10, J = 2, l = 0, initscale = 0.1,
                  warmup = 1_000, windowsize = 25, windowscale = 2,
                  tol = 1e-10, clip_grad = 1e6, tol_grad = 1e12):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)

@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import click
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from pathlib import Path
+import scipy.stats as st
 
 import bridgestan as bs
 from bsmodel import BSModel
@@ -52,6 +54,9 @@ def main(M, warmup, verbose, algorithm):
 
     plt.clf()
     plt.hist(thetas[warmup:, 0], histtype = "step", density = True, linewidth = 2)
+    Normal = st.norm(loc = 0, scale = 3)
+    x = np.linspace(-10, 10, 101)
+    plt.plot(x, Normal.pdf(x), color = "#D55E00")
     plt.tight_layout()
     plt.savefig(source_dir / f"experiments/funnel/histogram_{algorithm}.png")
     plt.close()

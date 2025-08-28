@@ -1,4 +1,4 @@
-J=1
+J=4
 experiment="ar1"
 output="experiments/$experiment"
 script="experiments_$experiment"

@@ -1,4 +1,4 @@
-J=1
+J=4
 experiment="accuracy"
 output="experiments/$experiment"
 script="experiments_$experiment"
