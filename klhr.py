@@ -82,6 +82,7 @@ class KLHR(MCMCBase):
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
+        print(f"f: {o.nfev}, j: {o.njev}")
         if self._draw > 0:
             self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
         return o.x

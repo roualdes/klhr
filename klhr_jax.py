@@ -1,6 +1,7 @@
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
 import jax
+import jax.numpy as jnp
 from scipy.optimize import minimize
 import scipy.stats as st
 
@@ -15,6 +16,7 @@ class KLHR(MCMCBase):
                  N = 16, K = 10, J = 2, l = 0, initscale = 0.1,
                  warmup = 1_000, windowsize = 25, windowscale = 2,
                  tol = 1e-10, clip_grad = 1e6, tol_grad = 1e12):
+        jax.config.update("jax_enable_x64", True)
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -28,6 +30,9 @@ class KLHR(MCMCBase):
         self.tol_grad = tol_grad
         self._mean = np.zeros(self.D)
         self._var = np.ones(self.D)
+
+        self._gjax = jax.grad(self._Ljax)
+        self._hjax = jax.hessian(self._Ljax)
 
         self._initscale = initscale
         self._windowedadaptation = WindowedAdaptation(warmup,
@@ -48,8 +53,38 @@ class KLHR(MCMCBase):
 
     def _unpack(self, eta):
         m = eta[0]
-        s = np.exp(eta[1]) + self.tol
+        s = jnp.exp(eta[1]) + self.tol
         return m, s
+
+    def _gausshermite_estimate(self, x, w, eta, rho):
+        m, s = self._unpack(eta)
+        y = self._sqrt2 * s * x + m
+        xi = y * rho + self.theta
+        logp = self.model.log_density(xi)
+        return w * logp
+
+    def _Ljax(self, eta: jax.Array, rho: jax.Array) -> jax.Array:
+        ghe = jax.vmap(self._gausshermite_estimate,
+                       in_axes = (0, 0, None, None))
+        summands = ghe(self.x, self.w, eta, rho)
+        return -jnp.sum(summands) * self._invsqrtpi - eta[1]
+
+    def _L(self, eta: np.ndarray, rho: np.ndarray) -> np.ndarray:
+        eta_j = jnp.asarray(eta)
+        rho_j = jnp.asarray(rho)
+        return self._Ljax(eta_j, rho_j).astype(np.float64)
+
+    def _gradL(self, eta: np.ndarray, rho: np.ndarray) -> np.ndarray:
+        # g = jax.grad(self._Ljax)
+        eta_j = jnp.asarray(eta)
+        rho_j = jnp.asarray(rho)
+        return np.asarray(self._gjax(eta_j, rho_j))
+
+    def _hessL(self, eta: np.ndarray, rho: np.ndarray) -> np.ndarray:
+        # h = jax.hessian(self._Ljax)
+        eta_j = jnp.asarray(eta)
+        rho_j = jnp.asarray(rho)
+        return np.asarray(self._hjax(eta_j, rho_j)).reshape(2, 2)
 
     def _logp_grad(self, theta):
         p, g = self.model.log_density_gradient(theta)
@@ -59,38 +94,16 @@ class KLHR(MCMCBase):
             g *= self.tol_grad / (ng + self.tol)
         return p, g
 
-    def _gausshermite_estimate(x, w, eta, rho):
-        m, s = self._unpack(eta)
-        y = self._sqrt2 * s * x + m
-        xi = y * rho + theta0
-        logp = self.model.logdensity(unflatten(xi))
-        return w * logp
-
-    def _L(self, eta, rho):
-        m, s = self._unpack(eta)
-        out = 0.0
-        grad = np.zeros(2)
-        for xn, wn in zip(self.x, self.w):
-            y = self._sqrt2 * s * xn + m
-            xi = self._to_rho(y, rho, self.theta)
-            logp, grad_logp = self._logp_grad(xi)
-            out += wn * logp
-            w_grad_logp_rho = wn * grad_logp.dot(rho)
-            grad[0] += w_grad_logp_rho
-            grad[1] += w_grad_logp_rho * s * xn * self._sqrt2
-        out *= self._invsqrtpi
-        out += eta[1]
-        grad[1] *= self._invsqrtpi
-        grad[1] += 1
-        return -out, -grad
-
     def fit(self, rho):
         init = self.rng.normal(size = 2) * self._initscale
         o = minimize(self._L,
                      init,
                      args = (rho,),
-                     jac = True,
-                     method = "BFGS")
+                     jac = self._gradL,
+                     hess = self._hessL,
+                     method = "trust-exact",
+                     options = {"gtol": 1e-4})
+        print(f"f: {o.nfev}, j: {o.njev}, h: {o.nhev}")
         if self._draw > 0:
             self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
         return o.x
@@ -100,9 +113,6 @@ class KLHR(MCMCBase):
         j = self.rng.choice(self.J + 1, p = p)
         rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
         return rho / np.linalg.norm(rho)
-
-    def _to_rho(self, x, rho, origin):
-        return x * rho + origin
 
     def _logq(self, x, eta):
         m, s = self._unpack(eta)
@@ -128,7 +138,7 @@ class KLHR(MCMCBase):
         m, s = self._unpack(eta)
         # zp = self.rng.normal(loc = m, scale = s, size = 1)
         zp = self._overrelaxed_proposal(eta)
-        thetap = self._to_rho(zp, rho, self.theta)
+        thetap = zp * rho + self.theta
 
         a = self.model.log_density(thetap)
         a -= self.model.log_density(self.theta)

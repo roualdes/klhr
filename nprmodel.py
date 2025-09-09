@@ -22,7 +22,7 @@ class NPRModel():
         except Exception as e:
             print(f"error: {e}")
             pass
-        return np.float64(ld)
+        return ld
 
     def log_density_gradient(self, theta: npt.NDArray[np.float64], **kws) -> Tuple[float, npt.NDArray[np.float64]]:
         ld = -np.inf

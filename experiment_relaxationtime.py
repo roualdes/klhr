@@ -11,8 +11,7 @@ import jax
 import bridgestan as bs
 from bsmodel import BSModel
 from klhr_sinh import KLHRSINH
-from klhr import KLHR
-
+from klhr_jax import KLHR
 
 
 @click.command()
@@ -26,7 +25,7 @@ from klhr import KLHR
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
 @click.argument("algorithm", type=str)
 def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, algorithm):
-    jax.config.update("jax_enable_x64", True)
+
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
     model = "earnings"
