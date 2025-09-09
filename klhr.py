@@ -51,7 +51,7 @@ class KLHR(MCMCBase):
         return m, s
 
     def _logp_grad(self, theta):
-        p, g = self.model.log_density_gradient(theta)
+        p, g = self.model.log_density_gradient(theta, propto=False)
         g = np.clip(g, -self.clip_grad, self.clip_grad)
         ng = np.linalg.norm(g)
         if ng > self.tol_grad:
