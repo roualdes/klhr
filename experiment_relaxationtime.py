@@ -6,41 +6,36 @@ import sys
 
 from models.earnings import Earnings
 from nprmodel import NPRModel
+import jax
 
 import bridgestan as bs
 from bsmodel import BSModel
 from klhr_sinh import KLHRSINH
 from klhr import KLHR
 
+
+
 @click.command()
 @click.option("-M", "--iterations", "M", type=int, default=2_000, help="number of iterations")
 @click.option("-w", "--warmup", "warmup", type=int, default=1_000, help="set value from which RMSEs are plot")
 @click.option("--windowsize", "windowsize", type=int, default=50, help="set window size")
 @click.option("--windowscale", "windowscale", type=int, default=2, help="set window scale")
-@click.option("-l", "--amnesia", "l", type=int, default=2, help="set the amnesia parameter for OnlinePCA")
+@click.option("-l", "--amnesia", "l", type=int, default=0, help="set the amnesia parameter for OnlinePCA")
 @click.option("-J", "J", type=int, default=2, help="number of eigenvectors")
 @click.option("-r", "--replication", "rep", type=int, default=0, help="replication number for naming output files")
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
 @click.argument("algorithm", type=str)
 def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, algorithm):
-
+    jax.config.update("jax_enable_x64", True)
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
     model = "earnings"
     source_dir = Path(__file__).resolve().parent
+    # bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
+    #                    data_file = source_dir / f"stan/{model}.json")
 
-    rng = np.random.default_rng(204)
-    theta = np.ones(4)#rng.normal(size = 4)
-    # print(f"{theta=}")
-    print(f"Bridgestan:")
-    bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
-                       data_file = source_dir / f"stan/{model}.json")
-    print(f"bs_model: {bs_model.log_density_gradient(theta, propto=False)}")
-    # print("NumPyro")
-    # earnings = Earnings()
-    # model = NPRModel(earnings.model(), earnings.data())
-    # print(f"npr_model: {model.log_density_gradient(theta)}")
-    sys.exit(0)
+    earnings = Earnings()
+    bs_model = NPRModel(earnings.model(), earnings.data())
 
     if algorithm == "klhr":
         algo = KLHR(bs_model,

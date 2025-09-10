@@ -9,7 +9,7 @@ from typing import Dict, Tuple
 
 class BridgeNumpyro():
     def __init__(self, model, data, seed = None):
-        jax.config.update("jax_enable_x64", True)
+
         self._model = model
         self._data = data
         if seed is None:
@@ -23,9 +23,12 @@ class BridgeNumpyro():
         self._initial_theta_map = self._param_info.z
         self._initial_theta, self._unflatten = ravel_pytree(self._initial_theta_map)
         self._D = jnp.size(self._initial_theta)
-        self._potential = jax.jit(self._potential(*self._data))
-        self._gradient = jax.jit(jax.grad(self._potential))
-        self._hessian = jax.jit(jax.hessian(self._potential))
+        # self._potential = jax.jit(self._potential(*self._data))
+        # self._gradient = jax.jit(jax.grad(self._potential))
+        # self._hessian = jax.jit(jax.hessian(self._potential))
+        self._potential = self._potential(*self._data)
+        self._gradient = jax.grad(self._potential)
+        self._hessian = jax.hessian(self._potential)
 
     def logdensity(self, theta_map: Dict) -> jax.Array:
         return -self._potential(theta_map)

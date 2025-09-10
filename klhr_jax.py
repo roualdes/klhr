@@ -1,5 +1,6 @@
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
+import jax
 from scipy.optimize import minimize
 import scipy.stats as st
 
@@ -20,7 +21,8 @@ class KLHR(MCMCBase):
         self.K = K
         self.J = J
         self.l = l
-        self.x, self.w = hermgauss(self.N)
+        x, w = hermgauss(self.N)
+        self.x, self.w = jnp.asarray(x), jnp.asarray(w)
         self.tol = tol
         self.clip_grad = clip_grad
         self.tol_grad = tol_grad
@@ -41,8 +43,8 @@ class KLHR(MCMCBase):
         self.minimization_failure_rate = 0
 
         # constants
-        self._invsqrtpi = 1 / np.sqrt(np.pi)
-        self._sqrt2 = np.sqrt(2)
+        self._invsqrtpi = 1 / jnp.sqrt(np.pi)
+        self._sqrt2 = jnp.sqrt(2)
 
     def _unpack(self, eta):
         m = eta[0]
@@ -56,6 +58,13 @@ class KLHR(MCMCBase):
         if ng > self.tol_grad:
             g *= self.tol_grad / (ng + self.tol)
         return p, g
+
+    def _gausshermite_estimate(x, w, eta, rho):
+        m, s = self._unpack(eta)
+        y = self._sqrt2 * s * x + m
+        xi = y * rho + theta0
+        logp = self.model.logdensity(unflatten(xi))
+        return w * logp
 
     def _L(self, eta, rho):
         m, s = self._unpack(eta)
