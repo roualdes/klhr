@@ -50,7 +50,7 @@ class KLHR(MCMCBase):
         return m, s
 
     def _logp_grad(self, theta):
-        p, g = self.model.log_density_gradient(theta)
+        p, g = self.model.log_density_gradient(theta, propto=False)
         g = np.clip(g, -self.clip_grad, self.clip_grad)
         ng = np.linalg.norm(g)
         if ng > self.tol_grad:
@@ -63,7 +63,7 @@ class KLHR(MCMCBase):
         grad = np.zeros(2)
         for xn, wn in zip(self.x, self.w):
             y = self._sqrt2 * s * xn + m
-            xi = self._to_rho(y, rho, self.theta)
+            xi = y * rho + self.theta
             logp, grad_logp = self._logp_grad(xi)
             out += wn * logp
             w_grad_logp_rho = wn * grad_logp.dot(rho)
@@ -71,7 +71,7 @@ class KLHR(MCMCBase):
             grad[1] += w_grad_logp_rho * s * xn * self._sqrt2
         out *= self._invsqrtpi
         out += eta[1]
-        grad[1] *= self._invsqrtpi
+        grad *= self._invsqrtpi
         grad[1] += 1
         return -out, -grad
 
@@ -81,10 +81,9 @@ class KLHR(MCMCBase):
                      init,
                      args = (rho,),
                      jac = True,
-                     method = "BFGS")
+                     method = "BFGS",
+                     options = {"gtol": 1e-4})
         print(f"f: {o.nfev}, j: {o.njev}")
-        if self._draw > 0:
-            self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
         return o.x
 
     def _random_direction(self):
@@ -92,9 +91,6 @@ class KLHR(MCMCBase):
         j = self.rng.choice(self.J + 1, p = p)
         rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
         return rho / np.linalg.norm(rho)
-
-    def _to_rho(self, x, rho, origin):
-        return x * rho + origin
 
     def _logq(self, x, eta):
         m, s = self._unpack(eta)
@@ -120,7 +116,7 @@ class KLHR(MCMCBase):
         m, s = self._unpack(eta)
         # zp = self.rng.normal(loc = m, scale = s, size = 1)
         zp = self._overrelaxed_proposal(eta)
-        thetap = self._to_rho(zp, rho, self.theta)
+        thetap = zp * rho + self.theta
 
         a = self.model.log_density(thetap)
         a -= self.model.log_density(self.theta)

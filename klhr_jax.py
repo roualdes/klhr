@@ -15,8 +15,7 @@ class KLHR(MCMCBase):
     def __init__(self, bsmodel, theta = None, seed = None,
                  N = 16, K = 10, J = 2, l = 0, initscale = 0.1,
                  warmup = 1_000, windowsize = 25, windowscale = 2,
-                 tol = 1e-10, clip_grad = 1e6, tol_grad = 1e12):
-        jax.config.update("jax_enable_x64", True)
+                 tol = 1e-10, clip_grad = 1e5, tol_grad = 1e8):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -31,8 +30,10 @@ class KLHR(MCMCBase):
         self._mean = np.zeros(self.D)
         self._var = np.ones(self.D)
 
-        self._gjax = jax.grad(self._Ljax)
-        self._hjax = jax.hessian(self._Ljax)
+        self._ghe =  jax.jit(jax.vmap(self._gausshermite_estimate,
+                                      in_axes = (0, 0, None, None)))
+        self._gjax = jax.jit(jax.grad(self._Ljax))
+        self._hjax = jax.jit(jax.hessian(self._Ljax))
 
         self._initscale = initscale
         self._windowedadaptation = WindowedAdaptation(warmup,
@@ -48,64 +49,62 @@ class KLHR(MCMCBase):
         self.minimization_failure_rate = 0
 
         # constants
-        self._invsqrtpi = 1 / jnp.sqrt(np.pi)
-        self._sqrt2 = jnp.sqrt(2)
+        self._invsqrtpi = 1.0 / jnp.sqrt(np.pi)
+        self._sqrt2 = jnp.sqrt(2.0)
 
     def _unpack(self, eta):
         m = eta[0]
         s = jnp.exp(eta[1]) + self.tol
         return m, s
 
+    def _clip(self, x: jax.Array) -> jax.Array:
+        y = jnp.clip(x, -self.clip_grad, self.clip_grad)
+        nx = jnp.linalg.norm(y)
+        z = jax.lax.select(nx > self.tol_grad, y * self.tol_grad / (nx + self.tol), y)
+        return z
+
     def _gausshermite_estimate(self, x, w, eta, rho):
         m, s = self._unpack(eta)
         y = self._sqrt2 * s * x + m
         xi = y * rho + self.theta
-        logp = self.model.log_density(xi)
+        logp = jnp.clip(self.model.log_density(xi), -self.clip_grad, self.clip_grad)
         return w * logp
 
     def _Ljax(self, eta: jax.Array, rho: jax.Array) -> jax.Array:
-        ghe = jax.vmap(self._gausshermite_estimate,
-                       in_axes = (0, 0, None, None))
-        summands = ghe(self.x, self.w, eta, rho)
-        return -jnp.sum(summands) * self._invsqrtpi - eta[1]
+        summands = self._ghe(self.x, self.w, eta, rho)
+        return -jnp.sum(summands, dtype=jnp.float64) * self._invsqrtpi - eta[1]
 
     def _L(self, eta: np.ndarray, rho: np.ndarray) -> np.ndarray:
-        eta_j = jnp.asarray(eta)
-        rho_j = jnp.asarray(rho)
-        return self._Ljax(eta_j, rho_j).astype(np.float64)
+        return self._Ljax(eta, rho).astype(np.float64)
 
     def _gradL(self, eta: np.ndarray, rho: np.ndarray) -> np.ndarray:
-        # g = jax.grad(self._Ljax)
-        eta_j = jnp.asarray(eta)
-        rho_j = jnp.asarray(rho)
-        return np.asarray(self._gjax(eta_j, rho_j))
+        g = self._clip(self._gjax(eta, rho))
+        return g
 
     def _hessL(self, eta: np.ndarray, rho: np.ndarray) -> np.ndarray:
-        # h = jax.hessian(self._Ljax)
-        eta_j = jnp.asarray(eta)
-        rho_j = jnp.asarray(rho)
-        return np.asarray(self._hjax(eta_j, rho_j)).reshape(2, 2)
+        h = self._clip(self._hjax(eta, rho))
+        return h.reshape(2, 2)
 
-    def _logp_grad(self, theta):
-        p, g = self.model.log_density_gradient(theta)
-        g = np.clip(g, -self.clip_grad, self.clip_grad)
-        ng = np.linalg.norm(g)
-        if ng > self.tol_grad:
-            g *= self.tol_grad / (ng + self.tol)
-        return p, g
+    @jax.jit
+    def _hvp(self, eta, v, rho):
+        eta_j = jnp.asarray(eta)
+        v_j = jnp.asarray(v)
+        rho_j = jnp.asarray(rho)
+        g_eta = lambda eta_: jax.grad(lambda xx: self._Ljax(xx, rho_j))(eta_)
+        _, Hxv = jax.jvp(g_eta, (eta_j,), (v_j,))
+        return self._clip(Hxv)
 
     def fit(self, rho):
         init = self.rng.normal(size = 2) * self._initscale
-        o = minimize(self._L,
+        o = jax.scipy.optimize.minimize(self._Ljax,
                      init,
+                     #jac = self._gradL,
+                     #hess = self._hessL,
+                     #hessp = self._hvp,
                      args = (rho,),
-                     jac = self._gradL,
-                     hess = self._hessL,
-                     method = "trust-exact",
-                     options = {"gtol": 1e-4})
-        print(f"f: {o.nfev}, j: {o.njev}, h: {o.nhev}")
-        if self._draw > 0:
-            self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
+                     method = "BFGS")
+        #options = {"gtol": 1e-4, "maxiter": 50})
+        # print(f"f: {o.nfev}, j: {o.njev}, h: {o.nhev}, x: {o.x}")
         return o.x
 
     def _random_direction(self):
@@ -151,7 +150,6 @@ class KLHR(MCMCBase):
 
         d = accept - self.acceptance_probability
         self.acceptance_probability += d / self._draw
-
         return self.theta
 
     def draw(self):

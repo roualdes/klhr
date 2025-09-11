@@ -5,13 +5,13 @@ data {
 }
 
 parameters {
-  real<lower=0> s;
   vector[2] beta;
   real<lower=0> sigma;
+  real<lower=0> s;
 }
 model {
   s ~ exponential(0.01);
-  beta ~ student_t(5., 0., s); /* 722.718); */
+  beta ~ student_t(5., 0., s);
   sigma ~ exponential(0.1);
-  earn ~ normal(beta[1] + beta[2] * height, sigma); /* 13040.7); */
+  earn ~ normal(beta[1] + beta[2] * height, sigma);
 }

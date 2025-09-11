@@ -9,7 +9,8 @@ class BSModel():
         self._data_file = data_file
         self.model = bs.StanModel(self._stan_file,
                                   data = self._data_file,
-                                  make_args=["STAN_THREADS=True"],
+                                  make_args=["STAN_THREADS=True",
+                                             "BRIDGESTAN_AD_HESSIAN=true"],
                                   warn = warn)
 
     def log_density(self, theta, **kws):
@@ -29,6 +30,15 @@ class BSModel():
         except Exception as e:
             pass
         return ld, grad
+
+    def log_density_hvp(self, theta, v, **kws):
+        ld = -np.inf
+        Hv = np.zeros_like(theta)
+        try:
+            ld, Hv = self.model.log_density_hessian_vector_product(theta, v)
+        except Exception as e:
+            pass
+        return ld, Hv
 
     def dim(self):
         return self.model.param_unc_num()
