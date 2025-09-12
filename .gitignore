@@ -217,3 +217,4 @@ stan/*
 *.out
 .virtual_documents/
 *.png
+.DS_Store

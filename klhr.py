@@ -1,3 +1,4 @@
+from functools import lru_cache
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from scipy.optimize import minimize
@@ -12,8 +13,8 @@ from windowedadaptation import WindowedAdaptation
 class KLHR(MCMCBase):
     def __init__(self, bsmodel, theta = None, seed = None,
                  N = 16, K = 10, J = 2, l = 0, initscale = 0.1,
-                 warmup = 1_000, windowsize = 25, windowscale = 2,
-                 tol = 1e-10, clip_grad = 1e6, tol_grad = 1e12):
+                 warmup = 1_000, windowsize = 50, windowscale = 2,
+                 tol = 1e-10, tol_clip = 1e6, tol_grad = 1e12):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -21,9 +22,9 @@ class KLHR(MCMCBase):
         self.J = J
         self.l = l
         self.x, self.w = hermgauss(self.N)
-        self.tol = tol
-        self.clip_grad = clip_grad
-        self.tol_grad = tol_grad
+        self._tol = tol
+        self._tol_clip = tol_clip
+        self._tol_grad = tol_grad
         self._mean = np.zeros(self.D)
         self._var = np.ones(self.D)
 
@@ -38,7 +39,6 @@ class KLHR(MCMCBase):
 
         self._draw = 0
         self.acceptance_probability = 0
-        self.minimization_failure_rate = 0
 
         # constants
         self._invsqrtpi = 1 / np.sqrt(np.pi)
@@ -46,44 +46,86 @@ class KLHR(MCMCBase):
 
     def _unpack(self, eta):
         m = eta[0]
-        s = np.exp(eta[1]) + self.tol
+        s = np.exp(eta[1]) + self._tol
         return m, s
 
-    def _logp_grad(self, theta):
-        p, g = self.model.log_density_gradient(theta, propto=False)
-        g = np.clip(g, -self.clip_grad, self.clip_grad)
-        ng = np.linalg.norm(g)
-        if ng > self.tol_grad:
-            g *= self.tol_grad / (ng + self.tol)
-        return p, g
+    def _clip(self, x):
+        x = np.clip(x, -self._tol_clip, self._tol_clip)
+        nx = np.linalg.norm(x)
+        if nx > self._tol_grad:
+            x *= self._tol_grad / (nx + self._tol)
+        return x
 
-    def _L(self, eta, rho):
-        m, s = self._unpack(eta)
-        out = 0.0
-        grad = np.zeros(2)
-        for xn, wn in zip(self.x, self.w):
-            y = self._sqrt2 * s * xn + m
-            xi = y * rho + self.theta
-            logp, grad_logp = self._logp_grad(xi)
-            out += wn * logp
-            w_grad_logp_rho = wn * grad_logp.dot(rho)
-            grad[0] += w_grad_logp_rho
-            grad[1] += w_grad_logp_rho * s * xn * self._sqrt2
-        out *= self._invsqrtpi
-        out += eta[1]
-        grad *= self._invsqrtpi
-        grad[1] += 1
-        return -out, -grad
+    def _make_loss(self):
+        def key(x):
+            return x.tobytes()
+
+        @lru_cache()
+        def logp_grad(k):
+            theta = np.frombuffer(k, dtype=np.float64).reshape(self.D)
+            return self.model.log_density_gradient(theta)
+
+        def L(eta, rho):
+            m, s = self._unpack(eta)
+            out = 0.0
+            for xn, wn in zip(self.x, self.w):
+                y = self._sqrt2 * s * xn + m
+                xi = y * rho + self.theta
+                logp, grad_logp = logp_grad(key(xi))
+                out += wn * logp
+            out *= self._invsqrtpi
+            out += eta[1]
+            return -out
+
+        def grad(eta, rho):
+            m, s = self._unpack(eta)
+            grad = np.zeros(2)
+            for xn, wn in  zip(self.x, self.w):
+                y = self._sqrt2 * s * xn + m
+                xi = y * rho + self.theta
+                _, grad_logp = logp_grad(key(xi))
+                w_grad_logp_rho = wn * grad_logp.dot(rho)
+                grad[0] += w_grad_logp_rho
+                grad[1] += w_grad_logp_rho * s * xn * self._sqrt2
+            grad *= self._invsqrtpi
+            grad[1] += 1
+            return self._clip(-grad)
+
+        def hess(eta, rho):
+            m, s = self._unpack(eta)
+            H = np.zeros((2, 2))
+            for xn, wn in zip(self.x, self.w):
+                y = self._sqrt2 * s * xn + m
+                xi = y * rho + self.theta
+                _, Hrho = self.model.log_density_hvp(xi, rho)
+                Hrho2 = rho.dot(Hrho)
+                sq = np.ones((2, 2)) * Hrho2
+                sq[[0, 1], [1, 0]] *= self._sqrt2 * xn * s
+                sq[1, 1] *= 2 * xn * xn * s * s
+                _, grad_logp = logp_grad(key(xi))
+                sq[1, 1] += grad_logp.dot(rho) * self._sqrt2 * xn * s
+                H += wn * sq
+            H *= -self._invsqrtpi
+            return self._clip(H)
+
+        def clear_cache():
+            logp_grad.cache_clear()
+
+        return L, grad, hess, clear_cache
 
     def fit(self, rho):
+        L, grad, hess, clear_cache = self._make_loss()
+        clear_cache()
         init = self.rng.normal(size = 2) * self._initscale
-        o = minimize(self._L,
+        o = minimize(L,
                      init,
+                     jac = grad,
+                     # hess = hess,
                      args = (rho,),
-                     jac = True,
-                     method = "BFGS",
-                     options = {"gtol": 1e-4})
-        print(f"f: {o.nfev}, j: {o.njev}")
+                     method = "BFGS")
+                     # method = "trust-ncg",
+                     #options = {"maxiter": 50})
+        #print(f"f: {o.nfev}, j: {o.njev}, h: {o.nhev}")
         return o.x
 
     def _random_direction(self):
@@ -134,6 +176,8 @@ class KLHR(MCMCBase):
 
     def draw(self):
         self._draw += 1
+        # if self._draw % 100 == 0:
+        #     print(f"draw {self._draw}")
         rho = self._random_direction()
         etakl = self.fit(rho)
         theta = self._metropolis_step(etakl, rho)
