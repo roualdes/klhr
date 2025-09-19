@@ -21,7 +21,7 @@ class KLHRSINH(MCMCBase):
 
         self.N = N
         self.K = K
-        self.J = J
+        self.J = J #BLG J
         self.l = l
         self.x, self.w = hermgauss(self.N)
         self.tol = tol
@@ -36,8 +36,9 @@ class KLHRSINH(MCMCBase):
                                                       windowsize = windowsize,
                                                       windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
-        self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
-        self._eigvecs = np.zeros((self.D, self.J + 1))
+        self._onlinemoments_density = OnlineMoments(self.D) 
+        self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l) 
+        self._eigvecs = np.zeros((self.D, self.J + 1)) 
         self._eigvals = np.ones(self.J + 1)
 
         self._draw = 0
@@ -53,7 +54,13 @@ class KLHRSINH(MCMCBase):
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
         j = self.rng.choice(self.J + 1, p = p)
-        rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
+        grad_var = self._onlinemoments_density.var()
+        # if (np.isclose(grad_var,0).any()): #If np.diag(grad_var) is not invertible BLG, should we adjust the tolerance of is close?
+        #     cov = np.diag(self._var)
+        # else :
+        #     cov = np.diag(self._var) * np.linalg.inv(np.diag(grad_var)) #find a way to ensure inverse exists
+        cov = np.diag(self._var / (grad_var + 1e-10)) #for diagonal matrices, can divide elementwise (not by zero), what should the tolerance be?
+        rho = self.rng.multivariate_normal(self._eigvecs[:, j], cov) 
         return rho / np.linalg.norm(rho)
 
     def _to_rho(self, x, rho, origin):
@@ -86,14 +93,15 @@ class KLHRSINH(MCMCBase):
 
     def _overrelaxed_proposal(self, eta):
         m, s, d, e = self._unpack(eta)
-        K = self.K
-        u = self._CDF(np.array([0]), eta)
-        r = st.binom(K, u).rvs()
+        K = self.K 
+        u = self._CDF(np.array([0]), eta) 
+        r = st.binom(K, u).rvs() 
         up = 0
-        if r > K - r:
+
+        if r > K - r: 
             v = st.beta(K - r + 1, 2 * r - K).rvs()
             up = u * v
-        elif r < K - r:
+        elif r < K - r: 
             v = st.beta(r + 1, K - 2 * r).rvs()
             up = 1 - (1 - u) * v
         elif r == K - r:
@@ -220,7 +228,7 @@ class KLHRSINH(MCMCBase):
 
     def _metropolis_step(self, eta, rho):
         # zp = self._T(self.rng.normal(size = 1), eta)
-        zp = self._overrelaxed_proposal(eta)
+        zp = self._overrelaxed_proposal(eta) # overrlaxed
         thetap = self._to_rho(zp, rho, self.theta)
 
         a = self.model.log_density(thetap) - self.model.log_density(self.theta)
@@ -246,10 +254,12 @@ class KLHRSINH(MCMCBase):
             self._mean = self._onlinemoments.mean()
             self._var = self._onlinemoments.var()
             self._onlinemoments.reset()
-            self._eigvecs[:, :self.J] = self._onlinepca.vectors()
-            self._eigvals[:self.J] = self._onlinepca.values()
+            self._eigvecs[:, :self.J] = self._onlinepca.vectors() 
+            self._eigvals[:self.J] = self._onlinepca.values() 
             self._onlinepca.reset()
         else:
+            _, g = self._logp_grad(theta)
+            self._onlinemoments_density.update(g)
             self._onlinemoments.update(theta)
             self._onlinepca.update(theta - self._mean)
 
