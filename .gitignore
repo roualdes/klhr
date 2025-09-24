@@ -218,3 +218,4 @@ stan/*
 .virtual_documents/
 *.png
 .DS_Store
+.juliahistory
