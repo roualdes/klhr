@@ -14,7 +14,7 @@ class KLHR(MCMCBase):
     def __init__(self, bsmodel, theta = None, seed = None,
                  N = 16, K = 10, J = 2, l = 0, initscale = 0.1,
                  warmup = 1_000, windowsize = 50, windowscale = 2,
-                 tol = 1e-10, tol_clip = 1e6, tol_grad = 1e12):
+                 tol = 1e-10, tol_clip = 1e6, tol_grad = 1e12, scale_dir_cov = False):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -33,6 +33,9 @@ class KLHR(MCMCBase):
                                                       windowsize = windowsize,
                                                       windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
+        self.scale_dir_cov = scale_dir_cov
+        if(scale_dir_cov):
+            self._onlinemoments_density = OnlineMoments(self.D) 
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
         self._eigvecs = np.zeros((self.D, self.J + 1))
         self._eigvals = np.ones(self.J + 1)
@@ -131,7 +134,12 @@ class KLHR(MCMCBase):
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
         j = self.rng.choice(self.J + 1, p = p)
-        rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
+        if(self.scale_dir_cov):
+            grad_var = self._onlinemoments_density.var()
+            cov = np.diag(np.sqrt(self._var / (grad_var + 1e-10)))  
+        else:
+            cov = np.diag(self._var)
+        rho = self.rng.multivariate_normal(self._eigvecs[:, j], cov) 
         return rho / np.linalg.norm(rho)
 
     def _logq(self, x, eta):
@@ -186,11 +194,15 @@ class KLHR(MCMCBase):
             self._mean = self._onlinemoments.mean()
             self._var = self._onlinemoments.var()
             self._onlinemoments.reset()
+            if (self.scale_dir_cov):
+                self._onlinemoments_density.reset()
             self._eigvecs[:, :self.J] = self._onlinepca.vectors()
             self._eigvals[:self.J] = self._onlinepca.values()
             self._onlinepca.reset()
         else:
             self._onlinemoments.update(theta)
+            if (self.scale_dir_cov):
+                self._onlinemoments_density.update(g)
             self._onlinepca.update(theta - self._mean)
 
         return theta

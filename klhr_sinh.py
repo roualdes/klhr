@@ -16,12 +16,12 @@ class KLHRSINH(MCMCBase):
                  initscale = 0.1,
                  warmup = 1_000, windowsize = 50, windowscale = 2,
                  tol = 1e-10, clip_trig = 600,
-                 clip_grad = 1e6, tol_grad = 1e12):
+                 clip_grad = 1e6, tol_grad = 1e12, scale_dir_cov = False): #BLG
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
         self.K = K
-        self.J = J #BLG J
+        self.J = J
         self.l = l
         self.x, self.w = hermgauss(self.N)
         self.tol = tol
@@ -36,7 +36,9 @@ class KLHRSINH(MCMCBase):
                                                       windowsize = windowsize,
                                                       windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
-        self._onlinemoments_density = OnlineMoments(self.D) 
+        self.scale_dir_cov = scale_dir_cov
+        if(scale_dir_cov):
+            self._onlinemoments_density = OnlineMoments(self.D) 
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l) 
         self._eigvecs = np.zeros((self.D, self.J + 1)) 
         self._eigvals = np.ones(self.J + 1)
@@ -54,12 +56,11 @@ class KLHRSINH(MCMCBase):
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
         j = self.rng.choice(self.J + 1, p = p)
-        grad_var = self._onlinemoments_density.var()
-        # if (np.isclose(grad_var,0).any()): #If np.diag(grad_var) is not invertible BLG, should we adjust the tolerance of is close?
-        #     cov = np.diag(self._var)
-        # else :
-        #     cov = np.diag(self._var) * np.linalg.inv(np.diag(grad_var)) #find a way to ensure inverse exists
-        cov = np.diag(self._var / (grad_var + 1e-10)) #for diagonal matrices, can divide elementwise (not by zero), what should the tolerance be?
+        if(self.scale_dir_cov):
+            grad_var = self._onlinemoments_density.var()
+            cov = np.diag(np.sqrt(self._var / (grad_var + 1e-10)))  
+        else:
+            cov = np.diag(self._var)
         rho = self.rng.multivariate_normal(self._eigvecs[:, j], cov) 
         return rho / np.linalg.norm(rho)
 
@@ -224,7 +225,7 @@ class KLHRSINH(MCMCBase):
                      method = "BFGS")
         if self._draw > 0:
             self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
-        return o.x
+        return o.x # mean, std, tail weight, asymmetry relation (klhr just mean and std) (tail weight = delta) asymmetry = epsilon
 
     def _metropolis_step(self, eta, rho):
         # zp = self._T(self.rng.normal(size = 1), eta)
@@ -254,12 +255,15 @@ class KLHRSINH(MCMCBase):
             self._mean = self._onlinemoments.mean()
             self._var = self._onlinemoments.var()
             self._onlinemoments.reset()
+            if (self.scale_dir_cov):
+                self._onlinemoments_density.reset()
             self._eigvecs[:, :self.J] = self._onlinepca.vectors() 
             self._eigvals[:self.J] = self._onlinepca.values() 
             self._onlinepca.reset()
         else:
             _, g = self._logp_grad(theta)
-            self._onlinemoments_density.update(g)
+            if (self.scale_dir_cov):
+                self._onlinemoments_density.update(g)
             self._onlinemoments.update(theta)
             self._onlinepca.update(theta - self._mean)
 
