@@ -1,8 +1,9 @@
 from functools import lru_cache
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
-from scipy.optimize import minimize
+from scipy.optimize import minimize, fmin_l_bfgs_b
 import scipy.stats as st
+import sys
 
 from bsmodel import BSModel
 from onlinemoments import OnlineMoments
@@ -14,12 +15,12 @@ class KLHR(MCMCBase):
     def __init__(self, bsmodel, theta = None, seed = None,
                  N = 16, K = 10, J = 2, l = 0, initscale = 0.1,
                  warmup = 1_000, windowsize = 50, windowscale = 2,
-                 tol = 1e-10, tol_clip = 1e6, tol_grad = 1e12):
+                 tol = 1e-12, tol_clip = 1e10, tol_grad = 1e2):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
         self.K = K
-        self.J = J
+        self.J = J if J < self.D else self.D - 1
         self.l = l
         self.x, self.w = hermgauss(self.N)
         self._tol = tol
@@ -27,6 +28,7 @@ class KLHR(MCMCBase):
         self._tol_grad = tol_grad
         self._mean = np.zeros(self.D)
         self._var = np.ones(self.D)
+        self._eta = None
 
         self._initscale = initscale
         self._windowedadaptation = WindowedAdaptation(warmup,
@@ -34,8 +36,10 @@ class KLHR(MCMCBase):
                                                       windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
-        self._eigvecs = np.zeros((self.D, self.J + 1))
-        self._eigvals = np.ones(self.J + 1)
+        # self._eigvecs = np.zeros((self.D, self.J + 1))
+        # self._eigvals = np.ones(self.J + 1)
+        self._eigvecs = np.zeros((self.D, self.J))
+        self._eigvals = np.ones(self.J)
 
         self._draw = 0
         self.acceptance_probability = 0
@@ -46,14 +50,14 @@ class KLHR(MCMCBase):
 
     def _unpack(self, eta):
         m = eta[0]
-        s = np.exp(eta[1]) + self._tol
+        s = np.exp(np.clip(eta[1], -700, 700)) # + self._tol
         return m, s
 
     def _clip(self, x):
         x = np.clip(x, -self._tol_clip, self._tol_clip)
-        nx = np.linalg.norm(x)
-        if nx > self._tol_grad:
-            x *= self._tol_grad / (nx + self._tol)
+        # nx = np.linalg.norm(x)
+        # if nx > self._tol_grad:
+        #     x *= self._tol_grad / (nx + self._tol)
         return x
 
     def _make_loss(self):
@@ -63,7 +67,8 @@ class KLHR(MCMCBase):
         @lru_cache()
         def logp_grad(k):
             theta = np.frombuffer(k, dtype=np.float64).reshape(self.D)
-            return self.model.log_density_gradient(theta)
+            logp, grad = self.model.log_density_gradient(theta)
+            return logp, self._clip(grad)
 
         def L(eta, rho):
             m, s = self._unpack(eta)
@@ -71,7 +76,7 @@ class KLHR(MCMCBase):
             for xn, wn in zip(self.x, self.w):
                 y = self._sqrt2 * s * xn + m
                 xi = y * rho + self.theta
-                logp, grad_logp = logp_grad(key(xi))
+                logp, _ = logp_grad(key(xi))
                 out += wn * logp
             out *= self._invsqrtpi
             out += eta[1]
@@ -89,7 +94,7 @@ class KLHR(MCMCBase):
                 grad[1] += w_grad_logp_rho * s * xn * self._sqrt2
             grad *= self._invsqrtpi
             grad[1] += 1
-            return self._clip(-grad)
+            return -grad
 
         def hess(eta, rho):
             m, s = self._unpack(eta)
@@ -106,32 +111,60 @@ class KLHR(MCMCBase):
                 sq[1, 1] += grad_logp.dot(rho) * self._sqrt2 * xn * s
                 H += wn * sq
             H *= -self._invsqrtpi
-            return self._clip(H)
+            return H
 
         def clear_cache():
             logp_grad.cache_clear()
 
         return L, grad, hess, clear_cache
 
-    def fit(self, rho):
+    def fit(self):
         L, grad, hess, clear_cache = self._make_loss()
         clear_cache()
-        init = self.rng.normal(size = 2) * self._initscale
+        init, rho, g = self._initialize(L, grad)
+        # if self._eta is not None:
+        #     init = self._eta
         o = minimize(L,
                      init,
                      jac = grad,
-                     # hess = hess,
+                     hess = hess,
                      args = (rho,),
-                     method = "BFGS")
-                     # method = "trust-ncg",
-                     #options = {"maxiter": 50})
-        #print(f"f: {o.nfev}, j: {o.njev}, h: {o.nhev}")
-        return o.x
+                     method = "trust-ncg")
+                     #options = {"maxls": 50, "maxcor": 100})
+        print(f"f: {o.nfev}, j: {o.njev}")
+        return o.x, rho
+
+    def _uniform(self):
+        u = self.rng.uniform(size = 2) * 2 - 1
+        return 2 * u
+
+    def _initialize(self, L, grad):
+        init = self._uniform()
+        # init = self.rng.normal(size = 2) * self._initscale
+        rho = self._random_direction()
+        l = L(init, rho)
+        g = grad(init, rho)
+        ng = np.linalg.norm(g)
+        max_init_attempts = 100
+        attempt = 1
+        while np.isnan(l) or np.isinf(l) or np.isnan(ng) or np.isinf(ng):
+            init = self.rng.normal(size = 2) * self._initscale
+            rho = self._random_direction()
+            l = L(init, rho)
+            g = grad(init, rho)
+            ng = np.linalg.norm(g)
+            if attempt > max_init_attempts:
+                print(f"logp unstable: can't initialize in {max_init_attempts} attempts.")
+                sys.exit(0)
+            attempt += 1
+        return init, rho, g
 
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
-        j = self.rng.choice(self.J + 1, p = p)
-        rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
+        # j = self.rng.choice(self.J + 1, p = p)
+        # rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
+        m = np.sum(p * self._eigvecs, axis = 1)
+        rho = self.rng.multivariate_normal(m, np.diag(self._var))
         return rho / np.linalg.norm(rho)
 
     def _logq(self, x, eta):
@@ -176,10 +209,7 @@ class KLHR(MCMCBase):
 
     def draw(self):
         self._draw += 1
-        # if self._draw % 100 == 0:
-        #     print(f"draw {self._draw}")
-        rho = self._random_direction()
-        etakl = self.fit(rho)
+        etakl, rho = self.fit()
         theta = self._metropolis_step(etakl, rho)
 
         if self._windowedadaptation.window_closed(self._draw):

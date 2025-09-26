@@ -1,6 +1,6 @@
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
-from scipy.optimize import minimize
+from scipy.optimize import minimize, root_scalar
 import scipy.special as sp
 import scipy.stats as st
 
@@ -15,8 +15,7 @@ class KLHRSINH(MCMCBase):
                  N = 16, K = 10, J = 2, l = 0,
                  initscale = 0.1,
                  warmup = 1_000, windowsize = 50, windowscale = 2,
-                 tol = 1e-10, clip_trig = 600,
-                 clip_grad = 1e6, tol_grad = 1e12):
+                 tol = 1e-12, tol_clip = 1e10, tol_grad = 1e2):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -24,10 +23,9 @@ class KLHRSINH(MCMCBase):
         self.J = J
         self.l = l
         self.x, self.w = hermgauss(self.N)
-        self.tol = tol
-        self.clip_trig = clip_trig
-        self.clip_grad = clip_grad
-        self.tol_grad = tol_grad
+        self._tol = tol
+        self._tol_clip = tol_clip
+        self._tol_grad = tol_grad
         self._mean = np.zeros(self.D)
         self._var = np.ones(self.D)
 
@@ -37,8 +35,10 @@ class KLHRSINH(MCMCBase):
                                                       windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
-        self._eigvecs = np.zeros((self.D, self.J + 1))
-        self._eigvals = np.ones(self.J + 1)
+        # self._eigvecs = np.zeros((self.D, self.J + 1))
+        # self._eigvals = np.ones(self.J + 1)
+        self._eigvecs = np.zeros((self.D, self.J))
+        self._eigvals = np.ones(self.J)
 
         self._draw = 0
         self.acceptance_probability = 0
@@ -52,8 +52,10 @@ class KLHRSINH(MCMCBase):
 
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
-        j = self.rng.choice(self.J + 1, p = p)
-        rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
+        # j = self.rng.choice(self.J + 1, p = p)
+        # rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
+        m = np.sum(p * self._eigvecs, axis = 1)
+        rho = self.rng.multivariate_normal(m, np.diag(self._var))
         return rho / np.linalg.norm(rho)
 
     def _to_rho(self, x, rho, origin):
@@ -61,8 +63,8 @@ class KLHRSINH(MCMCBase):
 
     def _unpack(self, eta):
         m = eta[0]
-        s = np.exp(eta[1]) + self.tol
-        d = np.exp(eta[2]) + self.tol
+        s = np.exp(np.clip(eta[1], -700, 700)) # + self.tol
+        d = np.exp(np.clip(eta[2], -700, 700)) # + self.tol
         e = eta[3]
         return m, s, d, e
 
@@ -73,7 +75,8 @@ class KLHRSINH(MCMCBase):
     def _T_inv(self, x, eta):
         m, s, d, e = self._unpack(eta)
         z = (x - m) / s
-        y = np.clip((np.arcsinh(z) - e) * d, -self.clip_trig, self.clip_trig)
+        y = (np.arcsinh(z) - e) * d
+        y = np.clip(y, -700, 700)
         return np.sinh(y)
 
     def _CDF(self, x, eta):
@@ -113,21 +116,23 @@ class KLHRSINH(MCMCBase):
 
     def _sinh_aed(self, x, eta):
         _, _, d, e = self._unpack(eta)
-        y = np.clip((np.arcsinh(x) + e) / d, -self.clip_trig, self.clip_trig)
+        y = (np.arcsinh(x) + e) / d
+        y = np.clip(y, -700, 700)
         return np.sinh(y)
 
     def _cosh_aed(self, x, eta):
         _, _, d, e = self._unpack(eta)
-        y = np.clip((np.arcsinh(x) + e) / d, -self.clip_trig, self.clip_trig)
+        y = (np.arcsinh(x) + e) / d
+        y = np.clip(y, -700, 700)
         return np.cosh(y)
 
     def _logp_grad(self, x):
         f, g = self.model.log_density_gradient(x)
-        g = np.clip(g, -self.clip_grad, self.clip_grad)
-        ng = np.linalg.norm(g)
-        if ng > self.tol_grad:
-            g *= self.tol_grad / (ng + self.tol)
-        return f, g
+        # g = np.clip(g, -self.clip_grad, self.clip_grad)
+        # ng = np.linalg.norm(g)
+        # if ng > self.tol_grad:
+        #     g *= self.tol_grad / (ng + self.tol)
+        return f, np.clip(g, -self._tol_clip, self._tol_clip)
 
     def _grad_T(self, x, eta):
         m, s, d, e = self._unpack(eta)
@@ -210,12 +215,12 @@ class KLHRSINH(MCMCBase):
                      jac = True,
                      method = "BFGS")
         o = minimize(self._L,
-                     np.array([o.x[0], o.x[1], 0, 0]),
+                     np.array([o.x[0], o.x[1], 0.0, 0.0]),
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
-        if self._draw > 0:
-            self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
+        # if self._draw > 0:
+        #     self.minimization_failure_rate += (o.success - self.minimization_failure_rate) / self._draw
         return o.x
 
     def _metropolis_step(self, eta, rho):

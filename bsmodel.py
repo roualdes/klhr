@@ -9,8 +9,7 @@ class BSModel():
         self._data_file = data_file
         self.model = bs.StanModel(self._stan_file,
                                   data = self._data_file,
-                                  make_args=["STAN_THREADS=True",
-                                             "BRIDGESTAN_AD_HESSIAN=true"],
+                                  make_args=["STAN_THREADS=True"],
                                   warn = warn)
 
     def log_density(self, theta, **kws):

@@ -4,15 +4,10 @@ import numpy as np
 from pathlib import Path
 import sys
 
-from models.earnings import Earnings
-from nprmodel import NPRModel
-import jax
-
 import bridgestan as bs
 from bsmodel import BSModel
 from klhr_sinh import KLHRSINH
 from klhr import KLHR
-
 
 @click.command()
 @click.option("-M", "--iterations", "M", type=int, default=2_000, help="number of iterations")
@@ -25,19 +20,12 @@ from klhr import KLHR
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
 @click.argument("algorithm", type=str)
 def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, algorithm):
-    jax.config.update("jax_enable_x64", True)
-    jax.config.update("jax_debug_nans", True)
-    jax.config.update("jax_debug_infs", True)
-
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
     model = "earnings"
     source_dir = Path(__file__).resolve().parent
     bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
                        data_file = source_dir / f"stan/{model}.json")
-
-    # earnings = Earnings()
-    # bs_model = NPRModel(earnings.model(), earnings.data())
 
     if algorithm == "klhr":
         algo = KLHR(bs_model,

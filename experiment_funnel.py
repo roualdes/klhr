@@ -42,7 +42,7 @@ def main(M, warmup, verbose, algorithm):
 
     if verbose:
         print(f"Acceptance rate: {algo.acceptance_probability}")
-        print(f"Minimization failure rate: {algo.minimization_failure_rate}")
+        # print(f"Minimization failure rate: {algo.minimization_failure_rate}")
 
     # df = pd.DataFrame(thetas, columns = algo.model.parameter_names())
     # df.to_parquet(source_dir / f"experiments/funnel/{algorithm}.parquet")

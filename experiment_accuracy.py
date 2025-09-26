@@ -74,7 +74,7 @@ def main(M, warmup, verbose, algorithm):
 
     if verbose:
         print(f"Acceptance rate: {algo.acceptance_probability}")
-        print(f"Minimization failure rate: {algo.minimization_failure_rate}")
+        # print(f"Minimization failure rate: {algo.minimization_failure_rate}")
         print(f"means: {stats_klhr['om'].mean()}")
         print(f"vars: {stats_klhr['om'].var()}")
 
