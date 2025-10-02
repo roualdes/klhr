@@ -1,7 +1,6 @@
 include("bsmodel.jl")
 include("onlinemoments.jl")
 include("onlinepca.jl")
-include("overrelaxed.jl")
 include("windowedadaptation.jl")
 
 using Distributions
@@ -9,52 +8,31 @@ using FastGaussQuadrature
 using LinearAlgebra
 using Optim
 
-function unpack(eta, cutoff = 700)
-    m = eta[1]
-    s = exp(clamp(eta[2], -cutoff, cutoff))
-    return m, s
-end
-
-function LVI(ldgh, eta, x, w, rho, origin)
+function LVI(ldg, eta, x, w, rho, origin)
     N = length(x)
+    dm = zero(eltype(x))
+    ds = zero(eltype(x))
     out = zero(eltype(x))
-    grad = zeros(eltype(x), 2)
-    #hess = zeros(eltype(x), 2, 2)
-    m, s = unpack(eta)
     for n in 1:N
-        xn = x[n]
-        z = s * xn + m
+        z = exp(eta[2]) * x[n] + eta[1]
         xi = rho * z + origin
-        ld, g, h = ldgh(xi)
+        ld, g = ldg(xi)
         wn = w[n]
         out += wn * ld
-        grho = g' *  rho
-        grad[1] += wn * grho
-        grad[2] += wn * grho * s * xn
-        # Hrho2 = dot(rho' * h, rho)
-        # sq = ones(2, 2) * Hrho2
-        # t = sqrt(2.0) * xn * s
-        # sq[1, 2] *= t
-        # sq[2, 1] *= t
-        # sq[2, 2] *= t ^ 2
-        # sq[2, 2] += (g' * rho) * t
-        # hess .+= wn .* sq
+        dm += wn * (g' * rho)
+        ds += wn * (g' * rho * exp(eta[2]) * x[n])
     end
-    out += eta[2]
-    grad[2] += 1
-    return -out, -grad #, -hess
+    return -out - eta[2], -dm, -ds - 1
 end
 
 function fit(ldg, rho, origin; N = 20, tol = 1e-2)
     x, w = gausshermite(N, normalize = true);
 
-    function fgh!(F, G, eta)
-        out, grad = LVI(ldg, eta, x, w, rho, origin)
-        # if H !== nothing
-        #     H .= hess
-        # end
+    function fg!(F, G, eta)
+        out, dm, ds = LVI(ldg, eta, x, w, rho, origin)
         if G !== nothing
-            G .= grad
+            G[1] = dm
+            G[2] = ds
         end
         if F !== nothing
             return out
@@ -62,24 +40,74 @@ function fit(ldg, rho, origin; N = 20, tol = 1e-2)
     end
 
     init = zeros(2)
-    obj = OnceDifferentiable(Optim.only_fg!(fgh!), init)
+    obj = OnceDifferentiable(Optim.only_fg!(fg!), init)
     method = BFGS()
-    # method = NewtonTrustRegion()
     opts = Optim.Options(x_abstol = tol, x_reltol = tol, f_abstol = tol, f_reltol = tol, g_abstol = tol)
     state = Optim.initial_state(method, opts, obj, init)
     r = Optim.optimize(obj, init, method, opts, state)
+    # mkl = r.minimizer[1]
+    # skl = sqrt(state.invH[1, 1])
     return r.minimizer
 end
 
+"""
+sinh-asinh transformation.
 
-function random_direction(evals, evecs, v)
-    p = evals ./ sum(evals)
-    m = sum(evecs .* p', dims = 2)[:]
-    rho = rand(MvNormal(m, Diagonal(v)))
-    return rho ./ norm(rho)
+mu in R, sigma > 0, delta > 0, and epsilon in R
+
+location dicted by mu
+scale dictaed by sigma
+tail weight dictated by delta
+skewness dicated by epsilon
+"""
+function sas(z, mu, sigma, delta, epsilon)
+    return mu + sigma * sinh(delta * asinh(z) + epsilon)
 end
 
+"""
+fit a sinh-arcsinh distirbution
 
+https://academic.oup.com/jrssig/article/16/2/6/7029435?login=true
+"""
+function LVI_sas(ldg, eta, x, w, rho, origin)
+    N = length(x)
+    dm = zero(eltype(x))
+    ds = zero(eltype(x))
+    out = zero(eltype(x))
+    for n in 1:N
+        z = sas(x[n], eta[1], exp(eta[2]), exp(eta[3]), eta[4])
+        # TODO what else?
+        xi = rho * z + origin
+        ld, g = ldg(xi)
+        wn = w[n]
+        out += wn * ld
+        dm += wn * (g' * rho)
+        ds += wn * (g' * rho * exp(eta[2]) * x[n])
+    end
+    return -out - eta[2], -dm, -ds - 1
+end
+
+"""
+https://arxiv.org/pdf/bayes-an/9506004
+"""
+function overrelaxed_proposal(NDist, K)
+    u = cdf(NDist, 0)
+    r = rand(Binomial(K, u))
+    up = if r > K - r
+        v = rand(Beta(K - r + 1, 2r - K))
+        u * v
+    elseif r < K - r
+        v = rand(Beta(r + 1, K - 2r))
+        1 - (1 - u) * v
+    elseif r == K - r
+        u
+    end
+    return quantile(NDist, up)
+end
+
+"""
+Original KLHR.
+"""
 function klhr(bsmodel;
               M = 1_000,
               warmup = div(M, 2),
@@ -92,7 +120,7 @@ function klhr(bsmodel;
               windowscale = 2)
 
     logp = bsmodel_ld(bsmodel)
-    logp_grad = bsmodel_ldgh(bsmodel)
+    logp_grad = bsmodel_ldg(bsmodel)
     D = bsmodel_dim(bsmodel)
 
     onlinemoments = OnlineMoments(D)
@@ -113,15 +141,15 @@ function klhr(bsmodel;
     end
 
     acceptance_rate = 0.0
+    mvn_direction = MvNormal(zeros(D), ones(D))
 
     for m in 2:M
-        rho = random_direction(reigenvals, reigenvecs, rv)
+        rho = rand(mvn_direction)
         rho ./= norm(rho)
 
         prev = draws[m - 1, :]
-        eta = fit(logp_grad, rho, prev; N, tol)
+        mkl, skl = fit(logp_grad, rho, prev; N, tol)
 
-        mkl, skl = unpack(eta)
         ND = Normal(mkl, skl)
         z = overrelaxed_proposal(ND, K) # randn(ND)
         prop = rho * z + prev
