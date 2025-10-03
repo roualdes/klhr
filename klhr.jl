@@ -15,6 +15,33 @@ function unpack(eta, cutoff = 700)
     return m, s
 end
 
+function L(ldg, eta, x, w, rho, origin)
+    N = length(x)
+    out = zero(eltype(x))
+    m, s = unpack(eta)
+    for n in 1:N
+        z = s * x[n] + m
+        xi = rho * z + origin
+        ld = ld(xi)
+        out += w[n] * ld
+    end
+    out += eta[2]
+    return -out
+end
+
+function grad!(g, ldg, eta, x, w, rho, origin)
+    N = length(x)
+    m, s = unpack(eta)
+    for n in 1:N
+        z = s * x[n] + m
+        xi = rho * z + origin
+        _, g = ldg(xi)
+
+
+    end
+    return -grad
+end
+
 function LVI(ldgh, eta, x, w, rho, origin)
     N = length(x)
     out = zero(eltype(x))
@@ -119,7 +146,8 @@ function klhr(bsmodel;
         rho ./= norm(rho)
 
         prev = draws[m - 1, :]
-        eta = fit(logp_grad, rho, prev; N, tol)
+        # eta = fit(logp_grad, rho, prev; N, tol)
+
 
         mkl, skl = unpack(eta)
         ND = Normal(mkl, skl)
