@@ -9,95 +9,45 @@ using FastGaussQuadrature
 using LinearAlgebra
 using Optim
 
-function unpack(eta, cutoff = 700)
+function unpack(eta, cutoff = 700.0)
     m = eta[1]
     s = exp(clamp(eta[2], -cutoff, cutoff))
     return m, s
 end
 
-function L(ldg, eta, x, w, rho, origin)
+function KL(logp, eta, x, w, rho, origin)
     N = length(x)
-    out = zero(eltype(x))
+    out = 0.0
     m, s = unpack(eta)
+    sqrt2 = sqrt(2)
     for n in 1:N
-        z = s * x[n] + m
+        z = sqrt2 * s * x[n] + m
         xi = rho * z + origin
-        ld = ld(xi)
-        out += w[n] * ld
+        lp = logp(xi)
+        out += w[n] * lp
     end
+    out /= sqrt(pi)
     out += eta[2]
     return -out
 end
 
-function grad!(g, ldg, eta, x, w, rho, origin)
+function KLgrad!(grad, logpg, eta, x, w, rho, origin)
     N = length(x)
     m, s = unpack(eta)
+    sqrt2 = sqrt(2)
     for n in 1:N
-        z = s * x[n] + m
+        ssx = sqrt2 * s * x[n]
+        z = ssx + m
         xi = rho * z + origin
-        _, g = ldg(xi)
-
-
+        _, g = logpg(xi)
+        wgr = w[n] * (g' * rho)
+        grad[1] += wgr
+        grad[2] += wgr * ssx
     end
-    return -grad
-end
-
-function LVI(ldgh, eta, x, w, rho, origin)
-    N = length(x)
-    out = zero(eltype(x))
-    grad = zeros(eltype(x), 2)
-    #hess = zeros(eltype(x), 2, 2)
-    m, s = unpack(eta)
-    for n in 1:N
-        xn = x[n]
-        z = s * xn + m
-        xi = rho * z + origin
-        ld, g, h = ldgh(xi)
-        wn = w[n]
-        out += wn * ld
-        grho = g' *  rho
-        grad[1] += wn * grho
-        grad[2] += wn * grho * s * xn
-        # Hrho2 = dot(rho' * h, rho)
-        # sq = ones(2, 2) * Hrho2
-        # t = sqrt(2.0) * xn * s
-        # sq[1, 2] *= t
-        # sq[2, 1] *= t
-        # sq[2, 2] *= t ^ 2
-        # sq[2, 2] += (g' * rho) * t
-        # hess .+= wn .* sq
-    end
-    out += eta[2]
+    grad /= sqrt(pi)
     grad[2] += 1
-    return -out, -grad #, -hess
+    grad *= -1
 end
-
-function fit(ldg, rho, origin; N = 20, tol = 1e-2)
-    x, w = gausshermite(N, normalize = true);
-
-    function fgh!(F, G, eta)
-        out, grad = LVI(ldg, eta, x, w, rho, origin)
-        # if H !== nothing
-        #     H .= hess
-        # end
-        if G !== nothing
-            G .= grad
-        end
-        if F !== nothing
-            return out
-        end
-    end
-
-    init = zeros(2)
-    obj = OnceDifferentiable(Optim.only_fg!(fgh!), init)
-    method = BFGS()
-    # method = NewtonTrustRegion()
-    opts = Optim.Options(x_abstol = tol, x_reltol = tol, f_abstol = tol, f_reltol = tol, g_abstol = tol)
-    state = Optim.initial_state(method, opts, obj, init)
-    r = Optim.optimize(obj, init, method, opts, state)
-    return r.minimizer
-end
-
 
 function random_direction(evals, evecs, v)
     p = evals ./ sum(evals)
@@ -106,14 +56,12 @@ function random_direction(evals, evecs, v)
     return rho ./ norm(rho)
 end
 
-
 function klhr(bsmodel;
               M = 1_000,
               warmup = div(M, 2),
-              N = 10,
+              N = 16,
               J = 2,
               K = 10,
-              tol = 1e-4,
               init = [],
               windowsize = 50,
               windowscale = 2)
@@ -122,6 +70,7 @@ function klhr(bsmodel;
     logp_grad = bsmodel_ldgh(bsmodel)
     D = bsmodel_dim(bsmodel)
 
+    wa = WindowedAdaptation(warmup; windowsize, windowscale)
     onlinemoments = OnlineMoments(D)
     rm = zeros(D)
     rv = ones(D)
@@ -130,37 +79,42 @@ function klhr(bsmodel;
     reigenvecs = zeros(D, J)
     reigenvals = ones(J)
 
-    wa = WindowedAdaptation(warmup; windowsize, windowscale)
-
     draws = zeros(M, D)
-    draws[1, :] = if length(init) == D
-        draws[1, :] .= init
+    draws[1, :] .= if length(init) == D
+        init
     else
         rand(Uniform(-1, 1), D)
     end
 
+    x, w = gausshermite(N)
     acceptance_rate = 0.0
 
     for m in 2:M
         rho = random_direction(reigenvals, reigenvecs, rv)
-        rho ./= norm(rho)
 
         prev = draws[m - 1, :]
-        # eta = fit(logp_grad, rho, prev; N, tol)
-
+        L(eta) = KL(logp, eta, x, w, rho, prev)
+        grad!(g, eta) = KLgrad!(g, logp_grad, eta, x, w, rho, prev)
+        ieta = randn(2) * 0.1
+        res = Optim.optimize(L, grad!, ieta, BFGS())
+        eta = Optim.minimizer(res)
+        if Optim.iterations(res) == 0
+            println("@ iteration $(m) didn't find minimum")
+        end
 
         mkl, skl = unpack(eta)
-        ND = Normal(mkl, skl)
-        z = overrelaxed_proposal(ND, K) # randn(ND)
-        prop = rho * z + prev
+        Q = Normal(mkl, skl)
+        # z = overrelaxed_proposal(Q, K) #
+        xi = rand(Q)
+        prop = rho * xi + prev
 
         a = logp(prop)
         a -= logp(prev)
-        a += logpdf(ND, 0)
-        a -= logpdf(ND, z)
+        a += logpdf(Q, 0.0)
+        a -= logpdf(Q, xi)
 
-        accept = log(rand()) < min(0, a)
-        draws[m, :] = accept * prop + (1 - accept) * prev
+        accept = log(rand()) < min(0.0, a)
+        draws[m, :] .= accept * prop + (1 - accept) * prev
         acceptance_rate += (accept - acceptance_rate) / (m - 1)
 
         if window_closed(wa, m)

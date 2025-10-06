@@ -41,8 +41,8 @@ class WindowedAdaptation():
 
 if __name__ == "__main__":
     warmup = 15_000
-    iterations = warmup + 1
-    wa = WindowedAdaptation(warmup)
+    iterations = 30_000
+    wa = WindowedAdaptation(warmup, windowsize = 50, windowscale = 2)
     closures = wa._closures
     for m in range(iterations):
         if wa.window_closed(m):

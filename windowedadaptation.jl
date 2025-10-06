@@ -11,16 +11,6 @@ struct WindowedAdaptation
     numwindows::Int64
 end
 
-function calculate_next_window(warmup, windowsize, windowscale, closewindow)
-    windowsize *= windowscale
-    nextclosewindow = closewindow + windowsize
-    if closewindow + windowscale * windowsize >= warmup
-        return warmup
-    end
-    return nextclosewindow
-end
-
-
 function WindowedAdaptation(warmup; windowsize = 50, windowscale = 2)
     closures = []
     closewindow = windowsize
@@ -29,11 +19,13 @@ function WindowedAdaptation(warmup; windowsize = 50, windowscale = 2)
         for w in 1:warmup
             if w == closewindow
                 push!(closures, w)
-                j += 1
-                closewindow = calculate_next_window(warmup,
-                                                    windowsize,
-                                                    windowscale^j,
-                                                    closewindow)
+                windowsize *= windowscale
+                nextclosewindow = closewindow + windowsize
+                if closewindow + windowscale * windowsize >= warmup
+                    closewindow = warmup
+                else
+                    closewindow = nextclosewindow
+                end
             end
         end
         numwindows = length(closures)
@@ -64,8 +56,8 @@ end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     @testset "WindowedAdaptation test" begin
-        warmup = 1_000
-        iterations = 2_001
+        warmup = 15_000
+        iterations = 30_000
         wa = WindowedAdaptation(warmup)
         for m in 1:iterations
             if window_closed(wa, m)

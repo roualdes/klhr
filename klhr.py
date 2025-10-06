@@ -36,7 +36,7 @@ class KLHR(MCMCBase):
                                                       windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
         self._scale_dir_cov = scale_dir_cov
-        self._onlinemoments_density = OnlineMoments(self.D) 
+        self._onlinemoments_density = OnlineMoments(self.D)
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
         # self._eigvecs = np.zeros((self.D, self.J + 1))
         # self._eigvals = np.ones(self.J + 1)
@@ -133,7 +133,7 @@ class KLHR(MCMCBase):
                      args = (rho,),
                      method = "trust-ncg")
                      #options = {"maxls": 50, "maxcor": 100})
-        print(f"f: {o.nfev}, j: {o.njev}")
+        # print(f"f: {o.nfev}, j: {o.njev}")
         return o.x, rho
 
     def _uniform(self):

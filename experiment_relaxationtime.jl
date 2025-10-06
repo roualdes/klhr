@@ -1,5 +1,5 @@
 using Pkg
-Pkg.activate(".")
+Pkg.activate(".");
 
 include("bsmodel.jl")
 include("klhr.jl")
@@ -27,10 +27,13 @@ Run relaxationtime experiment
 
 - `-v, --verbose`: print stuff
 """
-Comonicon.@main function main(algorithm; iterations::Int64=2_000, warmup::Int64=div(iterations, 2), verbose::Bool=false)
+Comonicon.@main function main(algorithm;
+                              iterations::Int64=2_000,
+                              warmup::Int64=div(iterations, 2),
+                              verbose::Bool=false)
 
     BS.set_bridgestan_path!(joinpath(homedir(), "bridgestan"))
-    model = "earnings"
+    model = "normal"
     source_dir = dirname(@__FILE__)
     bsmodel = BS.StanModel(joinpath(source_dir, "stan/$(model).stan"),
                            joinpath(source_dir, "stan/$(model).json"))
@@ -38,10 +41,12 @@ Comonicon.@main function main(algorithm; iterations::Int64=2_000, warmup::Int64=
 
     if algorithm == "klhr"
         draws = klhr(bsmodel;
-                    M = iterations)
+                     M = iterations,
+                     warmup = warmup)
     else
         println("don't know what to do yet with $(algorithm)")
     end
 
-    println(mean(draws[warmup:end, :], dims = 1));
+    println(mean(draws[warmup+1:end, :], dims = 1));
+    println(std(draws[warmup+1:end, :], dims = 1));
 end

@@ -22,11 +22,12 @@ end
 
 function update!(opca::OnlinePCA, u::AbstractVector)
     opca.n[] += 1
-    for i in 1:min(opca.K, opca.n[])
-        if i == opca.n[]
+    n = opca.n[]
+    for i in 1:min(opca.K, n)
+        if i == n
             opca.v[:, i] .= u
         else
-            w = (opca.n[] - 1.0 - opca.l) / opca.n[]
+            w = (n - 1.0 - opca.l) / n
             v = opca.v[:, i]
             opca.v[:, i] .= w .* v .+ (1 - w) .* u .* (u' * v) ./ (norm(v) + opca.tol) # eq 10
             v = opca.v[:, i]
