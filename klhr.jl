@@ -56,6 +56,73 @@ function random_direction(evals, evecs, v)
     return rho ./ norm(rho)
 end
 
+function batch_match(grad_logp, rho, prev, B)
+    m, mn = 0.0, 0.0
+    s, sn = 0.1, 0.1
+
+    oz = OnlineMoments(1)
+    og = OnlineMoments(1)
+
+    t = 0
+    while true
+        for _ in 1:B
+            z = randn() * s + m
+            update!(oz, [z])
+            _, grad = grad_logp(rho * z + prev)
+            g = dot(grad, rho)
+            println("g = $(g)")
+            update!(og, [g])
+        end
+
+        zbar = oz.m[1]
+        c = oz.v[1]
+        gbar = og.m[1]
+        gamma = og.v[1]
+
+        println("gbar = $(gbar)")
+        println("gamma = $(gamma)")
+
+        lt = B / (t + 1)
+        Lt = lt / (1 + lt)
+
+        u = lt * gamma + Lt * gbar ^ 2
+        v = s + lt * c + Lt * (m - zbar) ^ 2
+
+        sn = 2v / (1 + (1 + 4u * v) ^ 0.5)
+        mn = (1 - Lt) * m + Lt * (sn * gbar + zbar)
+
+        if isapprox(m, mn, atol = 1e-2) && isapprox(s, sn, atol = 1e-2)
+            println("batch & match took $(t) iterations to converge")
+            break
+        end
+
+        if t >= 100
+            println("max iterations reach, t = $(t)")
+            if isnan(sn)
+                sn = 1e-2
+                println("sn is nan")
+                println("zbar = $(zbar), c = $(c), gbar = $(gbar), gamma = $(gamma), u = $(u), v = $(v)")
+            else
+                sn = clamp(sn, 1e-10, 1e10)
+            end
+
+            if isnan(mn)
+                mn = 0.0
+                println("mn is nan")
+                println("zbar = $(zbar), c = $(c), gbar = $(gbar), gamma = $(gamma), u = $(u), v = $(v)")
+            else
+                mn = clamp(mn, -1e10, 1e10)
+            end
+            break
+        end
+
+        m = isnan(mn) ? 0.0 : mn
+        s = isnan(sn) ? 1.0 : sn
+        t += 1
+    end
+    return mn, sn
+end
+
 function klhr(bsmodel;
               M = 1_000,
               warmup = div(M, 2),
@@ -86,23 +153,24 @@ function klhr(bsmodel;
         rand(Uniform(-1, 1), D)
     end
 
-    x, w = gausshermite(N)
+    # x, w = gausshermite(N)
     acceptance_rate = 0.0
 
     for m in 2:M
         rho = random_direction(reigenvals, reigenvecs, rv)
-
         prev = draws[m - 1, :]
-        L(eta) = KL(logp, eta, x, w, rho, prev)
-        grad!(g, eta) = KLgrad!(g, logp_grad, eta, x, w, rho, prev)
-        ieta = randn(2) * 0.1
-        res = Optim.optimize(L, grad!, ieta, BFGS())
-        eta = Optim.minimizer(res)
-        if Optim.iterations(res) == 0
-            println("@ iteration $(m) didn't find minimum")
-        end
+        mkl, skl = batch_match(logp_grad, rho, prev, 4)
 
-        mkl, skl = unpack(eta)
+        # L(eta) = KL(logp, eta, x, w, rho, prev)
+        # grad!(g, eta) = KLgrad!(g, logp_grad, eta, x, w, rho, prev)
+        # ieta = randn(2) * 0.1
+        # res = Optim.optimize(L, grad!, ieta, BFGS())
+        # eta = Optim.minimizer(res)
+        # if Optim.iterations(res) == 0
+        #     println("@ iteration $(m) didn't find minimum")
+        # end
+
+        # mkl, skl = unpack(eta)
         Q = Normal(mkl, skl)
         # z = overrelaxed_proposal(Q, K) #
         xi = rand(Q)

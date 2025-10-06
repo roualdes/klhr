@@ -33,7 +33,7 @@ Comonicon.@main function main(algorithm;
                               verbose::Bool=false)
 
     BS.set_bridgestan_path!(joinpath(homedir(), "bridgestan"))
-    model = "normal"
+    model = "earnings"
     source_dir = dirname(@__FILE__)
     bsmodel = BS.StanModel(joinpath(source_dir, "stan/$(model).stan"),
                            joinpath(source_dir, "stan/$(model).json"))
