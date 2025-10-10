@@ -50,15 +50,16 @@ function KLgrad!(grad, logpg, eta, x, w, rho, origin)
 end
 
 function random_direction(evals, evecs, v)
-    p = evals ./ sum(evals)
-    m = sum(evecs .* p', dims = 2)[:]
-    rho = rand(MvNormal(m, Diagonal(v)))
+    rho = rand(MvNormal(zeros(2), Diagonal(ones(2))))
+    # p = evals ./ sum(evals)
+    # m = sum(evecs .* p', dims = 2)[:]
+    # rho = rand(MvNormal(m, Diagonal(v)))
     return rho ./ norm(rho)
 end
 
 function batch_match(grad_logp, rho, prev, B)
-    m, mn = 0.0, 0.0
-    s, sn = 0.1, 0.1
+    m, mn = zeros(2), zeros(2)
+    s, sn = ones(2), ones(2)
 
     oz = OnlineMoments(1)
     og = OnlineMoments(1)
@@ -70,7 +71,6 @@ function batch_match(grad_logp, rho, prev, B)
             update!(oz, [z])
             _, grad = grad_logp(rho * z + prev)
             g = dot(grad, rho)
-            println("g = $(g)")
             update!(og, [g])
         end
 
@@ -78,9 +78,6 @@ function batch_match(grad_logp, rho, prev, B)
         c = oz.v[1]
         gbar = og.m[1]
         gamma = og.v[1]
-
-        println("gbar = $(gbar)")
-        println("gamma = $(gamma)")
 
         lt = B / (t + 1)
         Lt = lt / (1 + lt)
@@ -91,33 +88,18 @@ function batch_match(grad_logp, rho, prev, B)
         sn = 2v / (1 + (1 + 4u * v) ^ 0.5)
         mn = (1 - Lt) * m + Lt * (sn * gbar + zbar)
 
-        if isapprox(m, mn, atol = 1e-2) && isapprox(s, sn, atol = 1e-2)
+        if isapprox(m, mn, atol = 1e-3) && isapprox(s, sn, atol = 1e-3)
             println("batch & match took $(t) iterations to converge")
             break
         end
 
         if t >= 100
             println("max iterations reach, t = $(t)")
-            if isnan(sn)
-                sn = 1e-2
-                println("sn is nan")
-                println("zbar = $(zbar), c = $(c), gbar = $(gbar), gamma = $(gamma), u = $(u), v = $(v)")
-            else
-                sn = clamp(sn, 1e-10, 1e10)
-            end
-
-            if isnan(mn)
-                mn = 0.0
-                println("mn is nan")
-                println("zbar = $(zbar), c = $(c), gbar = $(gbar), gamma = $(gamma), u = $(u), v = $(v)")
-            else
-                mn = clamp(mn, -1e10, 1e10)
-            end
             break
         end
 
-        m = isnan(mn) ? 0.0 : mn
-        s = isnan(sn) ? 1.0 : sn
+        m = mn
+        s = sn
         t += 1
     end
     return mn, sn

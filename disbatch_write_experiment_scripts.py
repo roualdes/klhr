@@ -22,15 +22,14 @@ def accuracy_experiment():
     """
     filename = "experiments_accuracy"
 
-    base = "python ../../experiment_accuracy.py"
+    base = "python experiment_accuracy.py"
 
     wd = "experiments/accuracy/"
 
     prefix = f"#DISBATCH PREFIX ( "
-    prefix += f"cd {wd} ; "
-    prefix += f"source ../../experiment_setup ; {base}\n"
+    prefix += f"source experiment_setup ; {base}\n"
 
-    suffix = "#DISBATCH SUFFIX ) &> ${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log\n"
+    suffix = "#DISBATCH SUFFIX ) &> experiments/${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log\n"
 
     M = 10_000_000
     algos = ["klhr", "klhrsinh"]
@@ -61,15 +60,14 @@ def ar1_experiment():
     """
     filename = "experiments_ar1"
 
-    base = "python ../../experiment_ar1.py -M 100_000 -w 50_000"
+    base = "python experiment_ar1.py -M 100_000 -w 50_000"
 
     wd = "experiments/ar1/"
 
     prefix = f"#DISBATCH PREFIX ( "
-    prefix += f"cd {wd} ; "
-    prefix += f"source ../../experiment_setup ; {base}\n"
+    prefix += f"source experiment_setup ; {base}\n"
 
-    suffix = "#DISBATCH SUFFIX ) &> ${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log\n"
+    suffix = "#DISBATCH SUFFIX ) &> experiments/${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log\n"
 
     windowsizes = [25, 50]
     windowscales = [2]
@@ -108,15 +106,14 @@ def funnel_experiment():
     """
     filename = "experiments_funnel"
 
-    base = "python ../../experiment_funnel.py"
+    base = "python experiment_funnel.py"
 
     wd = "experiments/funnel/"
 
     prefix = f"#DISBATCH PREFIX ( "
-    prefix += f"cd {wd} ; "
-    prefix += f"source ../../experiment_setup ; {base}\n"
+    prefix += f"source experiment_setup ; {base}\n"
 
-    suffix = "#DISBATCH SUFFIX ) &> ${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log\n"
+    suffix = "#DISBATCH SUFFIX ) &> experiments/${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log\n"
 
     M = 10_000_000
     warmups = [0, M // 2]
@@ -148,15 +145,14 @@ def relaxation_time_experiment():
     """
     filename = "experiments_relaxationtime"
 
-    base = "python ../../experiment_relaxationtime.py -M 30_000 -w 15_000"
+    base = "python experiment_relaxationtime.py -M 30_000 -w 15_000"
 
     wd = "experiments/relaxationtime/"
 
     prefix = f"#DISBATCH PREFIX ( "
-    prefix += f"cd {wd} ; "
-    prefix += f"source ../../experiment_setup ; {base}\n"
+    prefix += f"source experiment_setup ; {base}\n"
 
-    suffix = "#DISBATCH SUFFIX ) &> ${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log\n"
+    suffix = "#DISBATCH SUFFIX ) &> experiments/${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log\n"
 
     windowsizes = [25, 50]
     windowscales = [2]
