@@ -1,7 +1,7 @@
 from functools import lru_cache
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
-from scipy.optimize import minimize, fmin_l_bfgs_b
+from scipy.optimize import minimize
 import scipy.stats as st
 import sys
 
@@ -15,8 +15,8 @@ class KLHR(MCMCBase):
     def __init__(self, bsmodel, theta = None, seed = None,
                  N = 16, K = 10, J = 2, l = 0, initscale = 0.1,
                  warmup = 1_000, windowsize = 50, windowscale = 2,
-                 tol = 1e-12, tol_clip = 1e10, tol_grad = 1e2, scale_dir_cov = False, 
-                 overrelaxed = False, eigen_method_one = False):
+                 tol = 1e-12, scale_dir_cov = False,
+                 overrelaxed = True, eigen_method_one = True):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -25,8 +25,6 @@ class KLHR(MCMCBase):
         self.l = l
         self.x, self.w = hermgauss(self.N)
         self._tol = tol
-        self._tol_clip = tol_clip
-        self._tol_grad = tol_grad
         self._mean = np.zeros(self.D)
         self._cov = np.ones(self.D)
         self._eta = None
@@ -55,15 +53,8 @@ class KLHR(MCMCBase):
 
     def _unpack(self, eta):
         m = eta[0]
-        s = np.exp(np.clip(eta[1], -700, 700)) # + self._tol
+        s = np.exp(np.clip(eta[1], -650, 650))
         return m, s
-
-    def _clip(self, x):
-        x = np.clip(x, -self._tol_clip, self._tol_clip)
-        # nx = np.linalg.norm(x)
-        # if nx > self._tol_grad:
-        #     x *= self._tol_grad / (nx + self._tol)
-        return x
 
     def _make_loss(self):
         def key(x):
@@ -71,11 +62,15 @@ class KLHR(MCMCBase):
 
         @lru_cache()
         def logp_grad(k):
-            theta = np.frombuffer(k, dtype=np.float64).reshape(self.D)
+            theta = np.frombuffer(k).reshape(self.D)
             logp, grad = self.model.log_density_gradient(theta)
-            return logp, self._clip(grad)
+            return logp, np.clip(grad, -1e12, 1e12)
 
-        def L(eta, rho):
+        def logp_rho(x, rho):
+            logp, grad = logp_grad(key(x.reshape(-1) * rho + self.theta))
+            return -logp, -grad.dot(rho)
+
+        def KL(eta, rho):
             m, s = self._unpack(eta)
             out = 0.0
             for xn, wn in zip(self.x, self.w):
@@ -87,7 +82,7 @@ class KLHR(MCMCBase):
             out += eta[1]
             return -out
 
-        def grad(eta, rho):
+        def gradKL(eta, rho):
             m, s = self._unpack(eta)
             grad = np.zeros(2)
             for xn, wn in  zip(self.x, self.w):
@@ -101,7 +96,7 @@ class KLHR(MCMCBase):
             grad[1] += 1
             return -grad
 
-        def hess(eta, rho):
+        def hessKL(eta, rho):
             m, s = self._unpack(eta)
             H = np.zeros((2, 2))
             for xn, wn in zip(self.x, self.w):
@@ -121,48 +116,64 @@ class KLHR(MCMCBase):
         def clear_cache():
             logp_grad.cache_clear()
 
-        return L, grad, hess, clear_cache
+        return logp_rho, KL, gradKL, hessKL, clear_cache
 
-    def fit(self):
-        L, grad, hess, clear_cache = self._make_loss()
-        clear_cache()
-        init, rho, g = self._initialize(L, grad)
-        # if self._eta is not None:
-        #     init = self._eta
-        o = minimize(L,
-                     init,
-                     jac = grad,
-                     hess = hess,
-                     args = (rho,),
-                     method = "trust-ncg")
-                     #options = {"maxls": 50, "maxcor": 100})
-        # print(f"f: {o.nfev}, j: {o.njev}")
-        return o.x, rho
+    def _det(self, H):
+        a, b, c = H[0,0], H[0,1], H[1,1]
+        return a * c - b * b
 
-    def _uniform(self):
-        u = self.rng.uniform(size = 2) * 2 - 1
-        return 2 * u
+    def _inv(self, H):
+        det = self._det(H)
+        if abs(det) < self._tol:
+            if det != 0.0:
+                det = np.sign(det) * self._tol
+            else:
+                det = self._tol
+        a, b, c = H[0, 0], H[0, 1], H[1, 1]
+        invH = np.array([[c, -b],
+                         [-b,  a]]) / det
+        return invH
 
-    def _initialize(self, L, grad):
-        init = self._uniform()
-        # init = self.rng.normal(size = 2) * self._initscale
-        rho = self._random_direction()
-        l = L(init, rho)
-        g = grad(init, rho)
-        ng = np.linalg.norm(g)
-        max_init_attempts = 100
-        attempt = 1
-        while np.isnan(l) or np.isinf(l) or np.isnan(ng) or np.isinf(ng):
-            init = self.rng.normal(size = 2) * self._initscale
-            rho = self._random_direction()
-            l = L(init, rho)
-            g = grad(init, rho)
-            ng = np.linalg.norm(g)
-            if attempt > max_init_attempts:
-                print(f"logp unstable: can't initialize in {max_init_attempts} attempts.")
-                sys.exit(0)
+    def _posdef(self, H):
+        det = self._det(H)
+        return np.all(np.diag(H) > 0.0) and (det > 0.0)
+
+    def _safe_inv(self, H, lam=1e-6, max_attempts = 16):
+        I = np.eye(2)
+        attempt = 0
+        if np.any(np.isnan(H)) or np.any(np.isinf(H)):
+            return I
+        while not self._posdef(H):
+            H += lam * I
+            lam *= 10
             attempt += 1
-        return init, rho, g
+            if attempt > max_attempts:
+                return I
+        return self._inv(H)
+
+    def fit(self, rho):
+        logp_rho, KL, gradKL, hessKL, clear_cache = self._make_loss()
+        clear_cache()
+
+        init = self.rng.normal(size = 2)
+
+        o = minimize(KL,
+                     init,
+                     jac = gradKL,
+                     args = (rho,),
+                     method = "BFGS",
+                     options = {"maxiter": 1})
+
+        H = hessKL(o.x, rho)
+        Hinv = self._safe_inv(H)
+        o = minimize(KL,
+                     o.x,
+                     jac = gradKL,
+                     args = (rho,),
+                     method = "BFGS",
+                     options = {"hess_inv0": Hinv})
+
+        return o.x
 
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
@@ -197,9 +208,9 @@ class KLHR(MCMCBase):
     def _metropolis_step(self, eta, rho):
         m, s = self._unpack(eta)
         if self._overrelaxed:
-            zp = self.rng.normal(loc = m, scale = s, size = 1)
-        else:
             zp = self._overrelaxed_proposal(eta)
+        else:
+            zp = self.rng.normal(loc = m, scale = s, size = 1)
         thetap = zp * rho + self.theta
 
         a = self.model.log_density(thetap)
@@ -218,7 +229,8 @@ class KLHR(MCMCBase):
 
     def draw(self):
         self._draw += 1
-        etakl, rho = self.fit()
+        rho = self._random_direction()
+        etakl = self.fit(rho)
         theta = self._metropolis_step(etakl, rho)
 
         if self._windowedadaptation.window_closed(self._draw):
