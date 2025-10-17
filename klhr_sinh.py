@@ -253,7 +253,7 @@ class KLHRSINH(MCMCBase):
             self._mean = self._onlinemoments.mean() 
             self._cov = self._onlinemoments.var()
             if self._scale_dir_cov:
-                self._cov /= (self._tol + self.online_density.var())
+                self._cov /= (self._tol + self._onlinemoments_density.var())
             self._onlinemoments_density.reset()
             self._onlinemoments.reset()
             self._eigvecs[:, :self.J] = self._onlinepca.vectors()

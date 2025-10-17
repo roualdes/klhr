@@ -34,14 +34,16 @@ def accuracy_experiment():
     M = 10_000_000
     algos = ["klhr", "klhrsinh"]
     warmups = [0, M // 2]
+    scale_dir_covs = ["-s", ""]
 
     with open(filename, "w") as f:
         f.write(prefix)
         f.write(suffix)
         for algo in algos:
             for warmup in warmups:
-                command = f" -M {M} -w {warmup} {algo}\n"
-                f.write(command)
+                for scale_dir_cov in scale_dir_covs:
+                    command = f" -M {M} -w {warmup} {scale_dir_cov} {algo}\n"
+                    f.write(command)
 
     print(f"wrote file: {filename}")
 
@@ -73,6 +75,7 @@ def ar1_experiment():
     windowscales = [2]
     Js = [2, 4, 8, 10]
     Ls = [0, 2, 4]
+    scale_dir_covs = ["-s", ""]
     algos = ["klhr", "klhrsinh"]
     reps = range(10)
 
@@ -85,13 +88,15 @@ def ar1_experiment():
                     for l in Ls:
                         for algo in algos:
                             for r in reps:
-                                command = f" --windowsize {wsize} "
-                                command += f"--windowscale {wscale} "
-                                command += f"-J {j} "
-                                command += f"-l {l} "
-                                command += f"-r {r} "
-                                command += f"{algo}\n"
-                                f.write(command)
+                                for scale_dir_cov in scale_dir_covs:
+                                    command = f" --windowsize {wsize} "
+                                    command += f"--windowscale {wscale} "
+                                    command += f"-J {j} "
+                                    command += f"-l {l} "
+                                    command += f"-r {r} "
+                                    command += f"{scale_dir_cov} "
+                                    command += f"{algo}\n"
+                                    f.write(command)
 
     print(f"wrote file: {filename}")
 
@@ -117,6 +122,7 @@ def funnel_experiment():
 
     M = 10_000_000
     warmups = [0, M // 2]
+    scale_dir_covs = ["-s", ""]
     algos = ["klhr", "klhrsinh"]
 
     with open(filename, "w") as f:
@@ -124,8 +130,9 @@ def funnel_experiment():
         f.write(suffix)
         for algo in algos:
             for warmup in warmups:
-                command = f" -M {M} -w {warmup} {algo}\n"
-                f.write(command)
+                for scale_dir_cov in scale_dir_covs:
+                    command = f" -M {M} -w {warmup} {scale_dir_cov} {algo}\n"
+                    f.write(command)
 
     print(f"wrote file: {filename}")
 
@@ -158,6 +165,7 @@ def relaxation_time_experiment():
     windowscales = [2]
     Js = [2, 3]
     Ls = [0, 2, 4]
+    scale_dir_covs = ["-s", ""]
     algos = ["klhr", "klhrsinh"]
     reps = range(10)
 
@@ -170,13 +178,15 @@ def relaxation_time_experiment():
                     for l in Ls:
                         for algo in algos:
                             for r in reps:
-                                command = f" --windowsize {wsize} "
-                                command += f"--windowscale {wscale} "
-                                command += f"-J {j} "
-                                command += f"-l {l} "
-                                command += f"-r {r} "
-                                command += f"{algo}\n"
-                                f.write(command)
+                                for scale_dir_cov in scale_dir_covs:
+                                    command = f" --windowsize {wsize} "
+                                    command += f"--windowscale {wscale} "
+                                    command += f"-J {j} "
+                                    command += f"-l {l} "
+                                    command += f"-r {r} "
+                                    command += f"{scale_dir_cov} "
+                                    command += f"{algo}\n"
+                                    f.write(command)
 
     print(f"wrote file: {filename}")
 

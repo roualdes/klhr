@@ -18,8 +18,9 @@ from klhr import KLHR
 @click.option("-J", "J", type=int, default=2, help="number of eigenvectors")
 @click.option("-r", "--replication", "rep", type=int, default=0, help="replication number for naming output files")
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
+@click.option("-s", "--scale_dir_cov", "scale_dir_cov", is_flag=True, help="scale covariance matrix used to select a random direction")
 @click.argument("algorithm", type=str)
-def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, algorithm):
+def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, algorithm):
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
     model = "earnings"
@@ -33,14 +34,16 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, algorithm):
                     windowsize = windowsize,
                     windowscale = windowscale,
                     J = J,
-                    l = l)
+                    l = l,
+                    scale_dir_cov = scale_dir_cov)
     elif algorithm == "klhrsinh":
         algo = KLHRSINH(bs_model,
                         warmup = warmup,
                         windowsize = windowsize,
                         windowscale = windowscale,
                         J = J,
-                        l = l)
+                        l = l,
+                        scale_dir_cov = scale_dir_cov)
     else:
         print(f"Unknown algorithm {algorithm}")
         print("Available algorithms: klhr or klhrsinh")

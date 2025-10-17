@@ -15,8 +15,9 @@ from onlinemoments import OnlineMoments
 @click.option("-M", "--iterations", "M", type=int, default=1_000, help="number of iterations")
 @click.option("-w", "--warmup", "warmup", type=int, default=100, help="set value from which RMSEs are plot")
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
+@click.option("-s", "--scale_dir_cov", "scale_dir_cov", is_flag=True, help="scale covariance matrix used to select a random direction")
 @click.argument("algorithm", type=str)
-def main(M, warmup, verbose, algorithm):
+def main(M, warmup, verbose, scale_dir_cov, algorithm):
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
@@ -26,9 +27,9 @@ def main(M, warmup, verbose, algorithm):
                        data_file = source_dir / f"stan/{model}.json")
 
     if algorithm == "klhr":
-        algo = KLHR(bs_model, warmup = warmup)
+        algo = KLHR(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov)
     elif algorithm == "klhrsinh":
-        algo = KLHRSINH(bs_model, warmup = warmup)
+        algo = KLHRSINH(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov)
     else:
         print(f"Unknown algorithm {algorithm}")
         print("Available algorithms: klhr or klhrsinh")
