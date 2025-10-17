@@ -35,6 +35,8 @@ def accuracy_experiment():
     algos = ["klhr", "klhrsinh"]
     warmups = [0, M // 2]
     scale_dir_covs = ["-s", ""]
+    overrelaxed_flags = ["-o", ""]
+    eigen_method_one_flags = ["-e1", ""]
 
     with open(filename, "w") as f:
         f.write(prefix)
@@ -42,8 +44,10 @@ def accuracy_experiment():
         for algo in algos:
             for warmup in warmups:
                 for scale_dir_cov in scale_dir_covs:
-                    command = f" -M {M} -w {warmup} {scale_dir_cov} {algo}\n"
-                    f.write(command)
+                    for overrelaxed_flag in overrelaxed_flags:
+                        for eigen_method_one_flag in eigen_method_one_flags:
+                            command = f" -M {M} -w {warmup} {scale_dir_cov} {overrelaxed_flag} {eigen_method_one_flag} {algo}\n"
+                            f.write(command)
 
     print(f"wrote file: {filename}")
 
@@ -76,6 +80,8 @@ def ar1_experiment():
     Js = [2, 4, 8, 10]
     Ls = [0, 2, 4]
     scale_dir_covs = ["-s", ""]
+    overrelaxed_flags = ["-o", ""]
+    eigen_method_one_flags = ["-e1", ""]
     algos = ["klhr", "klhrsinh"]
     reps = range(10)
 
@@ -89,14 +95,18 @@ def ar1_experiment():
                         for algo in algos:
                             for r in reps:
                                 for scale_dir_cov in scale_dir_covs:
-                                    command = f" --windowsize {wsize} "
-                                    command += f"--windowscale {wscale} "
-                                    command += f"-J {j} "
-                                    command += f"-l {l} "
-                                    command += f"-r {r} "
-                                    command += f"{scale_dir_cov} "
-                                    command += f"{algo}\n"
-                                    f.write(command)
+                                    for overrelaxed_flag in overrelaxed_flags:
+                                        for eigen_method_one_flag in eigen_method_one_flags:
+                                            command = f" --windowsize {wsize} "
+                                            command += f"--windowscale {wscale} "
+                                            command += f"-J {j} "
+                                            command += f"-l {l} "
+                                            command += f"-r {r} "
+                                            command += f"{scale_dir_cov} "
+                                            command += f"{overrelaxed_flag} "
+                                            command += f"{eigen_method_one_flag} "
+                                            command += f"{algo}\n"
+                                            f.write(command)
 
     print(f"wrote file: {filename}")
 
@@ -123,6 +133,8 @@ def funnel_experiment():
     M = 10_000_000
     warmups = [0, M // 2]
     scale_dir_covs = ["-s", ""]
+    overrelaxed_flags = ["-o", ""]
+    eigen_method_one_flags = ["-e1", ""]
     algos = ["klhr", "klhrsinh"]
 
     with open(filename, "w") as f:
@@ -131,8 +143,10 @@ def funnel_experiment():
         for algo in algos:
             for warmup in warmups:
                 for scale_dir_cov in scale_dir_covs:
-                    command = f" -M {M} -w {warmup} {scale_dir_cov} {algo}\n"
-                    f.write(command)
+                    for overrelaxed_flag in overrelaxed_flags:
+                        for eigen_method_one_flag in eigen_method_one_flags:
+                            command = f" -M {M} -w {warmup} {scale_dir_cov} {overrelaxed_flag} {eigen_method_one_flag} {algo}\n"
+                            f.write(command)
 
     print(f"wrote file: {filename}")
 
@@ -166,6 +180,8 @@ def relaxation_time_experiment():
     Js = [2, 3]
     Ls = [0, 2, 4]
     scale_dir_covs = ["-s", ""]
+    overrelaxed_flags = ["-o", ""]
+    eigen_method_one_flags = ["-e1", ""]
     algos = ["klhr", "klhrsinh"]
     reps = range(10)
 
@@ -179,14 +195,18 @@ def relaxation_time_experiment():
                         for algo in algos:
                             for r in reps:
                                 for scale_dir_cov in scale_dir_covs:
-                                    command = f" --windowsize {wsize} "
-                                    command += f"--windowscale {wscale} "
-                                    command += f"-J {j} "
-                                    command += f"-l {l} "
-                                    command += f"-r {r} "
-                                    command += f"{scale_dir_cov} "
-                                    command += f"{algo}\n"
-                                    f.write(command)
+                                    for overrelaxed_flag in overrelaxed_flags:
+                                        for eigen_method_one_flag in eigen_method_one_flags:
+                                            command = f" --windowsize {wsize} "
+                                            command += f"--windowscale {wscale} "
+                                            command += f"-J {j} "
+                                            command += f"-l {l} "
+                                            command += f"-r {r} "
+                                            command += f"{scale_dir_cov} "
+                                            command += f"{overrelaxed_flag} "
+                                            command += f"{eigen_method_one_flag} "
+                                            command += f"{algo}\n"
+                                            f.write(command)
 
     print(f"wrote file: {filename}")
 
