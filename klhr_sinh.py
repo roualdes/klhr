@@ -15,7 +15,8 @@ class KLHRSINH(MCMCBase):
                  N = 16, K = 10, J = 2, l = 0,
                  initscale = 0.1,
                  warmup = 1_000, windowsize = 50, windowscale = 2,
-                 tol = 1e-12, tol_clip = 1e10, tol_grad = 1e2, scale_dir_cov = False):
+                 tol = 1e-12, tol_clip = 1e10, tol_grad = 1e2, 
+                 scale_dir_cov = False, overrelaxed = False, eigen_method_one = False):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -35,6 +36,8 @@ class KLHRSINH(MCMCBase):
                                                       windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
         self._scale_dir_cov = scale_dir_cov
+        self._overrelaxed = overrelaxed
+        self._eigen_method_one = eigen_method_one
         self._onlinemoments_density = OnlineMoments(self.D) 
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
         # self._eigvecs = np.zeros((self.D, self.J + 1))
@@ -54,10 +57,12 @@ class KLHRSINH(MCMCBase):
 
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
-        # j = self.rng.choice(self.J + 1, p = p)
-        # rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._var))
-        m = np.sum(p * self._eigvecs, axis = 1)
-        rho = self.rng.multivariate_normal(m, np.diag(self._cov))
+        if self._eigen_method_one:
+            j = self.rng.choice(self.J + 1, p = p)
+            rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._cov))
+        else:
+            m = np.sum(p * self._eigvecs, axis = 1)
+            rho = self.rng.multivariate_normal(m, np.diag(self._cov))
         return rho / np.linalg.norm(rho)
 
     def _to_rho(self, x, rho, origin):
@@ -226,8 +231,10 @@ class KLHRSINH(MCMCBase):
         return o.x
 
     def _metropolis_step(self, eta, rho):
-        # zp = self._T(self.rng.normal(size = 1), eta)
-        zp = self._overrelaxed_proposal(eta)
+        if self._overrelaxed:
+            zp = self.rng.normal(loc = m, scale = s, size = 1)
+        else:
+            zp = self._overrelaxed_proposal(eta)
         thetap = self._to_rho(zp, rho, self.theta)
 
         a = self.model.log_density(thetap) - self.model.log_density(self.theta)
