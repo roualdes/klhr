@@ -261,10 +261,10 @@ class KLHRSINH(MCMCBase):
         def clear_cache():
             logp_grad.cache_clear()
 
-        return KLnormal, gradKLnormal, KL, gradKL, hessKL, clear_cache
+        return KLnormal, gradKLnormal, KL, gradKL, hessKLnormal, clear_cache 
 
     def fit(self, rho):
-        KLnormal, gradKLnormal, KL, gradKL, hessKL, clear_cache = \
+        KLnormal, gradKLnormal, KL, gradKL, hessKLnormal, clear_cache = \
             self._make_loss()
         clear_cache()
 
