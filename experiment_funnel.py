@@ -1,10 +1,12 @@
 from pathlib import Path
+import sys
 
 import click
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scipy.stats as st
+
 
 import bridgestan as bs
 from bsmodel import BSModel
@@ -31,7 +33,7 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
 
     if algorithm == "klhr":
         algo = KLHR(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
-    elif algorithm == "klhrsinh":
+    elif algorithm == "klhr_sinh":
         algo = KLHRSINH(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
     else:
         print(f"Unknown algorithm {algorithm}")

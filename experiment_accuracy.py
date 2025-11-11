@@ -59,8 +59,10 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
     log_density_iid = np.zeros(M)
 
     mdx = np.arange(M)
+    draws = algo.sample(M)
+
     for m in mdx:
-        theta = algo.draw()
+        theta = draws[m]
         stats_klhr["om"].update(theta)
         stats_klhr["rmse_mean"][m] = np.sqrt(np.mean( stats_klhr["om"].mean() ** 2) )
         stats_klhr["rmse_var"][m] = np.sqrt(np.mean( (stats_klhr["om"].var() - 1) ** 2 ))
@@ -77,7 +79,8 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
 
     if verbose:
         print(f"Acceptance rate: {algo.acceptance_probability}")
-        # print(f"Minimization failure rate: {algo.minimization_failure_rate}")
+        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) for m in range(M-1)])
+        print(f"MSJD: {np.round(msjd, 2)}")
         print(f"means: {stats_klhr['om'].mean()}")
         print(f"vars: {stats_klhr['om'].var()}")
 

@@ -17,7 +17,6 @@ class BSModel():
         try:
             ld = self.model.log_density(theta, **kws)
         except Exception as e:
-            print(f"error: {e}")
             pass
         return ld
 

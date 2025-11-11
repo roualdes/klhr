@@ -40,7 +40,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                     scale_dir_cov = scale_dir_cov,
                     overrelaxed = overrelaxed,
                     eigen_method_one = eigen_method_one)
-    elif algorithm == "klhrsinh":
+    elif algorithm == "klhr_sinh":
         algo = KLHRSINH(bs_model,
                         warmup = warmup,
                         windowsize = windowsize,
@@ -76,6 +76,9 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
     plt.close()
 
     if verbose:
+        print(f"Acceptance rate: {np.round(algo.acceptance_probability, 2)}")
+        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) for m in range(M-1)])
+        print(f"MSJD: {np.round(msjd, 2)}")
         print(np.mean(draws[warmup:, :], axis = 0))
         print(np.std(draws[warmup:, :], axis = 0))
 
