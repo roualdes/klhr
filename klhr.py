@@ -2,7 +2,9 @@ from functools import lru_cache
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from scipy.optimize import minimize
+from scipy.integrate import quad
 import scipy.stats as st
+
 import sys
 
 from bsmodel import BSModel
@@ -15,8 +17,8 @@ class KLHR(MCMCBase):
     def __init__(self, bsmodel, theta = None, seed = None,
                  N = 16, K = 10, J = 2, l = 0, initscale = 0.1,
                  warmup = 1_000, windowsize = 50, windowscale = 2,
-                 tol = 1e-12, scale_dir_cov = False,
-                 overrelaxed = True, eigen_method_one = True):
+                 tol = 1e-8, scale_dir_cov = False,
+                 overrelaxed = False, eigen_method_one = True):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -56,139 +58,64 @@ class KLHR(MCMCBase):
         s = np.exp(np.clip(eta[1], -650, 650))
         return m, s
 
-    def _make_loss(self):
-        def key(x):
-            return x.tobytes()
+    def _logp_grad(self, x):
+        x_unc = self.model.unconstrain(x)
+        logp, grad = self.model.log_density_gradient(x_unc)
+        return logp, np.clip(grad, -1e12, 1e12)
 
-        @lru_cache()
-        def logp_grad(k):
-            theta = np.frombuffer(k).reshape(self.D)
-            logp, grad = self.model.log_density_gradient(theta)
-            return logp, np.clip(grad, -1e12, 1e12)
+    def KL(self, eta, rho):
+        m, s = self._unpack(eta)
+        out = 0.0
+        grad = np.zeros(2)
+        for xn, wn in zip(self.x, self.w):
+            y = self._sqrt2 * s * xn + m
+            xi = y * rho + self.theta
+            logp, grad_logp = self._logp_grad(xi)
+            out += wn * logp
+            w_grad_logp_rho = wn * grad_logp.dot(rho)
+            grad[0] += w_grad_logp_rho
+            grad[1] += w_grad_logp_rho * xn * self._sqrt2
+        out *= self._invsqrtpi
+        out += np.log(eta[1])
+        grad *= self._invsqrtpi
+        grad[1] += 1 / eta[1]
+        return -out, -grad
 
-        def logp_rho(x, rho):
-            logp, grad = logp_grad(key(x.reshape(-1) * rho + self.theta))
-            return -logp, -grad.dot(rho)
-
-        def KL(eta, rho):
-            m, s = self._unpack(eta)
-            out = 0.0
-            for xn, wn in zip(self.x, self.w):
-                y = self._sqrt2 * s * xn + m
-                xi = y * rho + self.theta
-                logp, _ = logp_grad(key(xi))
-                out += wn * logp
-            out *= self._invsqrtpi
-            out += eta[1]
-            return -out
-
-        def gradKL(eta, rho):
-            m, s = self._unpack(eta)
-            grad = np.zeros(2)
-            for xn, wn in  zip(self.x, self.w):
-                y = self._sqrt2 * s * xn + m
-                xi = y * rho + self.theta
-                _, grad_logp = logp_grad(key(xi))
-                w_grad_logp_rho = wn * grad_logp.dot(rho)
-                grad[0] += w_grad_logp_rho
-                grad[1] += w_grad_logp_rho * s * xn * self._sqrt2
-            grad *= self._invsqrtpi
-            grad[1] += 1
-            return -grad
-
-        def hessKL(eta, rho):
-            m, s = self._unpack(eta)
-            H = np.zeros((2, 2))
-            for xn, wn in zip(self.x, self.w):
-                y = self._sqrt2 * s * xn + m
-                xi = y * rho + self.theta
-                _, Hrho = self.model.log_density_hvp(xi, rho)
-                Hrho2 = rho.dot(Hrho)
-                sq = np.ones((2, 2)) * Hrho2
-                sq[[0, 1], [1, 0]] *= self._sqrt2 * xn * s
-                sq[1, 1] *= 2 * xn * xn * s * s
-                _, grad_logp = logp_grad(key(xi))
-                sq[1, 1] += grad_logp.dot(rho) * self._sqrt2 * xn * s
-                H += wn * sq
-            H *= -self._invsqrtpi
-            return H
-
-        def clear_cache():
-            logp_grad.cache_clear()
-
-        return logp_rho, KL, gradKL, hessKL, clear_cache
-
-    def _det(self, H):
-        a, b, c = H[0,0], H[0,1], H[1,1]
-        return a * c - b * b
-
-    def _inv(self, H):
-        det = self._det(H)
-        if abs(det) < self._tol:
-            if det != 0.0:
-                det = np.sign(det) * self._tol
-            else:
-                det = self._tol
-        a, b, c = H[0, 0], H[0, 1], H[1, 1]
-        invH = np.array([[c, -b],
-                         [-b,  a]]) / det
-        return invH
-
-    def _posdef(self, H):
-        det = self._det(H)
-        return np.all(np.diag(H) > 0.0) and (det > 0.0)
-
-    def _safe_inv(self, H, lam=1e-6, max_attempts = 16):
-        I = np.eye(2)
-        attempt = 0
-        if np.any(np.isnan(H)) or np.any(np.isinf(H)):
-            return I
-        while not self._posdef(H):
-            H += lam * I
-            lam *= 10
-            attempt += 1
-            if attempt > max_attempts:
-                return I
-        return self._inv(H)
+    def forwardKL(self, eta, rho):
+        m, s = self._unpack(eta)
+        def f(x):
+            y = x # s * x + m
+            xi = y * rho + self.theta
+            logp = self.model.log_density(xi)
+            logq = self._logq(x, eta)
+            # print(f"logp = {logp}, logq = {logq}")
+            return (logp - logq) * np.exp(np.clip(logp, -700, 700))
+        return quad(f, -np.inf, np.inf)[0]
 
     def fit(self, rho):
-        logp_rho, KL, gradKL, hessKL, clear_cache = self._make_loss()
-        clear_cache()
-
-        init = self.rng.normal(size = 2)
-
-        o = minimize(KL,
-                     init,
-                     jac = gradKL,
-                     args = (rho,),
-                     method = "BFGS",
-                     options = {"maxiter": 1})
-
-        H = hessKL(o.x, rho)
-        Hinv = self._safe_inv(H)
-        o = minimize(KL,
-                     o.x,
-                     jac = gradKL,
-                     args = (rho,),
-                     method = "BFGS",
-                     options = {"hess_inv0": Hinv})
-
+        init = self.rng.normal(size = 2) * self._initscale
+        o = minimize(self.forwardKL, init, args = (rho,))
         return o.x
 
     def _random_direction(self):
-        p = self._eigvals / np.sum(self._eigvals)
+        evals = self._eigvals
+        p = evals / np.sum(evals)
         if self._eigen_method_one:
             j = self.rng.choice(self.J + 1, p = p)
-            rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._cov))
+            m = evals[j] * self._eigvecs[:, j]
         else:
-            m = np.sum(p * self._eigvecs, axis = 1)
-            rho = self.rng.multivariate_normal(m, np.diag(self._cov))
+            m = np.sum(evals * self._eigvecs, axis = 1)
+        S = np.diag(self._cov)
+        rho = self.rng.multivariate_normal(m, S)
         return rho / np.linalg.norm(rho)
 
     def _logq(self, x, eta):
         m, s = self._unpack(eta)
         z = (x - m) / s
-        return -np.log(s) - 0.5 * z * z
+        o = -np.log(s) - 0.5 * z * z
+        if np.isnan(o) or np.isinf(o):
+            return -np.inf
+        return o
 
     def _overrelaxed_proposal(self, eta):
         m, s = self._unpack(eta)
@@ -229,6 +156,8 @@ class KLHR(MCMCBase):
 
     def draw(self):
         self._draw += 1
+        if self._draw % 1000 == 0:
+            print(self._draw)
         rho = self._random_direction()
         etakl = self.fit(rho)
         theta = self._metropolis_step(etakl, rho)
