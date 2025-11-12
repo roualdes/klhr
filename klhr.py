@@ -178,7 +178,7 @@ class KLHR(MCMCBase):
     def _random_direction(self):
         p = self._eigvals / np.sum(self._eigvals)
         if self._eigen_method_one:
-            j = self.rng.choice(self.J + 1, p = p)
+            j = self.rng.choice(np.size(self._eigvals), p = p)
             rho = self.rng.multivariate_normal(self._eigvecs[:, j], np.diag(self._cov))
         else:
             m = np.sum(p * self._eigvecs, axis = 1)
