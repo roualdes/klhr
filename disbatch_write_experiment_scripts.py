@@ -143,12 +143,12 @@ def funnel_experiment():
         f.write(prefix)
         f.write(suffix)
         for algo in algos:
-            for rep in reps:
+            for r in reps:
                 for warmup in warmups:
                     for scale_dir_cov in scale_dir_covs:
                         for overrelaxed_flag in overrelaxed_flags:
                             for eigen_method_one_flag in eigen_method_one_flags:
-                                command = f" -M {M} -w {warmup} {scale_dir_cov} {overrelaxed_flag} {eigen_method_one_flag} {algo}\n"
+                                command = f" -M {M} -w {warmup} {r} {scale_dir_cov} {overrelaxed_flag} {eigen_method_one_flag} {algo}\n"
                                 f.write(command)
 
     print(f"wrote file: {filename}")
