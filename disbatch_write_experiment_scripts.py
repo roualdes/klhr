@@ -136,17 +136,20 @@ def funnel_experiment():
     overrelaxed_flags = ["-o", ""]
     eigen_method_one_flags = ["-e1", ""]
     algos = ["klhr", "klhrsinh"]
+    reps = range(10)
+
 
     with open(filename, "w") as f:
         f.write(prefix)
         f.write(suffix)
         for algo in algos:
-            for warmup in warmups:
-                for scale_dir_cov in scale_dir_covs:
-                    for overrelaxed_flag in overrelaxed_flags:
-                        for eigen_method_one_flag in eigen_method_one_flags:
-                            command = f" -M {M} -w {warmup} {scale_dir_cov} {overrelaxed_flag} {eigen_method_one_flag} {algo}\n"
-                            f.write(command)
+            for rep in reps:
+                for warmup in warmups:
+                    for scale_dir_cov in scale_dir_covs:
+                        for overrelaxed_flag in overrelaxed_flags:
+                            for eigen_method_one_flag in eigen_method_one_flags:
+                                command = f" -M {M} -w {warmup} {scale_dir_cov} {overrelaxed_flag} {eigen_method_one_flag} {algo}\n"
+                                f.write(command)
 
     print(f"wrote file: {filename}")
 
