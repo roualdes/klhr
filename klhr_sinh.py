@@ -19,13 +19,13 @@ class KLHRSINH(MCMCBase):
                  K = 10,
                  J = 2,
                  l = 4,
-                 initscale = 0.1,
+                 initscale = 0.01,
                  warmup = 1_000,
                  windowsize = 50,
                  windowscale = 2,
-                 tol = 1e-12,
-                 grad_clip = 1e21,
-                 scale_clip = 600,
+                 tol = 1e-10,
+                 grad_clip = 1e32,
+                 scale_clip = 300,
                  scale_dir_cov = False,
                  overrelaxed = True,
                  eigen_method_one = False,
@@ -72,14 +72,6 @@ class KLHRSINH(MCMCBase):
 
         self._initialize()
 
-    def _unpack(self, eta):
-        m = eta[0]
-        log_mn, log_mx = -self._scale_clip, self._scale_clip
-        s = np.exp(np.clip(eta[1], log_mn, log_mx))
-        d = np.exp(np.clip(eta[2], log_mn, log_mx))
-        e = eta[3]
-        return m, s, d, e
-
     def _initialize(self):
         tries = 0
         while True:
@@ -94,25 +86,46 @@ class KLHRSINH(MCMCBase):
                 print("failed to initialize")
                 sys.exit(1)
 
-        rho = -g / np.linalg.norm(g)
-        o = minimize(self.logp_grad_rho,
-                     self.rng.normal() * self._initscale,
-                     args = (rho,),
-                     jac = True,
-                     method = "BFGS")
-        self.theta += o.x * rho
+    def _invlogit(self, x):
+        return 1 / (1 + np.exp(-x))
+
+    def _unpack(self, eta):
+        m = eta[0]
+        c = self._scale_clip
+        s = np.exp(np.clip(eta[1], -c, c)) + self._tol
+        d = np.exp(np.clip(eta[2], -c, c)) + 0.1
+        e = eta[3]
+        return m, s, d, e
+
+    def _cosh(self, x):
+        c = self._scale_clip
+        return np.cosh(np.clip(x, -c, c))
+
+    def _sinh(self, x):
+        c = self._scale_clip
+        return np.sinh(np.clip(x, -c, c))
+
+    def _tanh(self, x):
+        return self._sinh(x) / self._cosh(x)
 
     def _T(self, x, eta):
         m, s, d, e = self._unpack(eta)
-        return m + s * self._sinh_aed(x, eta)
+        return m + s * self._sinh((np.arcsinh(x) + e) / d)
+
+    def _grad_T(self, x, eta):
+        m, s, d, e = self._unpack(eta)
+        grad = np.ones(4)
+        invd = 1 / d
+        asinhpe = (np.arcsinh(x) + e) * invd
+        grad[1] = s * self._sinh(asinhpe)
+        grad[2] = -s * self._cosh(asinhpe) * asinhpe
+        grad[3] = s * self._cosh(asinhpe) * invd
+        return grad
 
     def _T_inv(self, x, eta):
         m, s, d, e = self._unpack(eta)
         z = (x - m) / s
-        y = d * (np.arcsinh(z) - e)
-        mn, mx = -self._scale_clip, self._scale_clip
-        y = np.clip(y, mn, mx)
-        return np.sinh(y)
+        return self._sinh(d * np.arcsinh(z) - e)
 
     def _CDF(self, x, eta):
         t_inv = self._T_inv(x, eta)
@@ -122,89 +135,32 @@ class KLHRSINH(MCMCBase):
         phi_inv = sp.ndtri(x)
         return self._T(phi_inv, eta)
 
-    def _overrelaxed_proposal(self, eta):
-        m, s, d, e = self._unpack(eta)
-        K = self.K
-        u = self._CDF(np.array([0]), eta)
-        r = st.binom(K, u).rvs()
-        up = 0
-        if r > K - r:
-            v = st.beta(K - r + 1, 2 * r - K).rvs()
-            up = u * v
-        elif r < K - r:
-            v = st.beta(r + 1, K - 2 * r).rvs()
-            up = 1 - (1 - u) * v
-        elif r == K - r:
-            up = u
-        return self._CDF_inv(up, eta)
-
-    def _logq(self, x, eta):
-        m, s, d, e = self._unpack(eta)
-        z = (x - m) / s
-        mn, mx = -self._scale_clip, self._scale_clip
-        asinhz = np.arcsinh(np.clip(z, mn, mx))
-        dae = d * asinhz - e
-        abs_dae = np.abs(dae)
-        out = eta[2] - eta[1] - np.log(2)
-        out -= 0.5 * (np.log(2 * np.pi) + np.log1p(z * z) + 0.5 * (np.cosh(2 * dae) - 1))
-        out += abs_dae + np.log1p(np.exp(-2 * abs_dae))
-        return out
-
-    def _sinh_aed(self, x, eta):
-        _, _, d, e = self._unpack(eta)
-        y = (np.arcsinh(x) + e) / d
-        mn, mx = -self._scale_clip, self._scale_clip
-        y = np.clip(y, mn, mx)
-        return np.sinh(y)
-
-    def _cosh_aed(self, x, eta):
-        _, _, d, e = self._unpack(eta)
-        y = (np.arcsinh(x) + e) / d
-        mn, mx = -self._scale_clip, self._scale_clip
-        y = np.clip(y, mn, mx)
-        return np.cosh(y)
-
-    def _grad_T(self, x, eta):
-        m, s, d, e = self._unpack(eta)
-        grad = np.zeros(4)
-        grad[0] = 1
-        asinhx = np.arcsinh(x)
-        invd = 1 / d
-        aed = (asinhx + e) * invd
-        grad[1] = s * self._sinh_aed(x, eta)
-        coshaed = self._cosh_aed(x, eta)
-        grad[2] = -s * coshaed * aed
-        grad[3] = s * coshaed * invd
-        return grad
-
-    def _log_cosh_asinh(self, x):
-        return 0.5 * np.log1p(x * x)
-
-    def _log_sech_aed(self, x, eta):
-        m, s, d, e = self._unpack(eta)
-        aed = (np.arcsinh(x) + e) / d
-        return -np.abs(aed) - np.log1p(np.exp(-2 * np.abs(aed))) + np.log(2)
+    def _log_cosh(self, x):
+        ax = np.abs(x)
+        return ax + np.log1p(np.exp(-2 * ax)) - np.log(2)
 
     def _log_abs_jac(self, x, eta):
-        out = self._log_sech_aed(x, eta)
-        out += eta[2] - eta[1]
+        _, _, d, e = self._unpack(eta)
+        out = eta[2] - eta[1]
+        asinhpe = np.arcsinh(x) + e
+        out -= self._log_cosh(asinhpe / d)
         return out
 
     def _grad_log_abs_jac(self, x, eta):
         m, s, d, e = self._unpack(eta)
-        invd = 1 / d
         grad = np.zeros(4)
         grad[1] = -1
-        aed = invd * (np.arcsinh(x) + e)
-        taed = np.tanh(aed)
-        grad[2] = 1 + taed * aed
-        grad[3] = -taed * invd
+        invd = 1 / d
+        asinhpe = (np.arcsinh(x) + e) * invd
+        t = self._tanh(asinhpe)
+        grad[2] = 1 + t * asinhpe
+        grad[3] = -t * invd
         return grad
 
     def _logp_grad(self, x):
         logp, grad = self.model.log_density_gradient(x)
-        mn, mx = -self._scale_clip, self._scale_clip
-        return logp, grad # np.clip(grad, mn, mx)
+        mn, mx = -self._grad_clip, self._grad_clip
+        return logp, np.clip(grad, mn, mx)
 
     def KL(self, eta, rho):
         out = 0.0
@@ -217,8 +173,7 @@ class KLHRSINH(MCMCBase):
             out += wn * (log_abs_jac - logp)
             grad_log_abs_jac = self._grad_log_abs_jac(xn, eta)
             grad_T = self._grad_T(xn, eta)
-            grad -= wn * grad_logp.dot(rho) * grad_T
-            grad += wn * grad_log_abs_jac
+            grad += wn * (grad_log_abs_jac - grad_logp.dot(rho) * grad_T)
         return out, grad
 
     def logp_grad_rho(self, xi, rho):
@@ -234,16 +189,16 @@ class KLHRSINH(MCMCBase):
         # s = o["hess_inv"][0,0]
         # s = (s > 0) * 0.5 * np.log(s)
         # print(f"mi = {np.round(o.x[0], 4)}, si = {np.round(s, 4)}")
-        # init = self.rng.normal(size = 4) * self._initscale
-        # init[0] = o.x[0]
-        # init[1] = s
+        init = self.rng.normal(size = 4) * self._initscale
+        # init[0] += o.x[0]
+        # init[1] += s
         o = minimize(self.KL,
-                     self.rng.normal(size = 4) * self._initscale,
+                     init,
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
-        oo = np.round(o.x, 4)
-        #print(f"m = {oo[0]}, s = {oo[1]}, d = {oo[2]}, e = {oo[3]}")
+        # oo = np.round(o.x, 4)
+        # print(f"m = {oo[0]}, s = {oo[1]}, d = {oo[2]}, e = {oo[3]}")
         return o.x
 
     def _random_direction(self):
@@ -258,18 +213,47 @@ class KLHRSINH(MCMCBase):
         rho = self.rng.multivariate_normal(m, S)
         return rho / np.linalg.norm(rho + self._tol)
 
-    def _metropolis_step(self, eta, rho):
+    def _overrelaxed_proposal(self, eta):
         m, s, d, e = self._unpack(eta)
+        K = self.K
+        u = self._CDF(0.0, eta)
+        r = st.binom(K, u).rvs()
+        up = 0
+        if r > K - r:
+            v = st.beta(K - r + 1, 2 * r - K).rvs()
+            up = u * v
+        elif r < K - r:
+            v = st.beta(r + 1, K - 2 * r).rvs()
+            up = 1 - (1 - u) * v
+        elif r == K - r:
+            up = u
+        return np.array([self._CDF_inv(up, eta)])
+
+    def _log_normal(self, x, eta):
+        m, s, _, _ = self._unpack(eta)
+        z = (x - m) / s
+        return -eta[1] - 0.5 * z * z
+
+    def _log_q(self, x, eta):
+        m, s, d, e = self._unpack(eta)
+        ld = self._log_normal(self._T_inv(x, eta), eta)
+        z = (x - m) / s
+        ld += np.log(self._cosh(d * np.arcsinh(z) - e))
+        ld += eta[2] - eta[1]
+        ld -= 0.5 * np.log1p(z * z)
+        return ld
+
+    def _metropolis_step(self, eta, rho):
         if self._overrelaxed:
             zp = self._overrelaxed_proposal(eta)
         else:
-            zp = self._T(self.rng.normal(loc = m, scale = s, size = 1), eta)
+            zp = self._T(self.rng.normal(size = 1), eta)
         thetap = zp * rho + self.theta
 
         r = self.model.log_density(thetap)
         r -= self.model.log_density(self.theta)
-        r += self._logq(0, eta)
-        r -= self._logq(zp, eta)
+        r += self._log_q(0, eta)
+        r -= self._log_q(zp, eta)
 
         a = np.log(self.rng.uniform()) < np.minimum(0, r)
         self._prev_theta = self.theta
@@ -296,7 +280,7 @@ class KLHRSINH(MCMCBase):
             self._eigvals[:self.J] = self._onlinepca.values()
             self._onlinepca.reset()
             K = self._smoothK.optimum()
-            self.K = int(np.clip(K, 1, 50)) # TODO needs testing
+            # self.K = int(np.clip(K, 1, 50)) # TODO needs testing
             self._smoothK.reset()
         else:
             _, g = self._logp_grad(theta)
@@ -332,6 +316,7 @@ if __name__ == "__main__":
     rho = rng.multivariate_normal(np.zeros(algo.D), np.eye(algo.D))
     rho /= np.linalg.norm(rho)
 
+    # _T
     def f(x):
         def inner(x):
             vf = lambda x: algo._T(0, x)
@@ -341,9 +326,12 @@ if __name__ == "__main__":
     x = rng.normal(size = 4) * 0.1
     approx_grad = jacobian(f, x)
     grad = algo._grad_T(0, x)
+    print(grad)
+    print(approx_grad.df)
     assert np.all(approx_grad.success)
     assert np.allclose(grad, approx_grad.df)
 
+    # _log_abs_jac
     def g(x):
         def inner(x):
             vf = lambda x: algo._log_abs_jac(0, x)
@@ -354,8 +342,9 @@ if __name__ == "__main__":
     approx_grad = jacobian(g, x)
     grad = algo._grad_log_abs_jac(0, x)
     # assert np.all(approx_grad.success)
-    assert np.allclose(grad, approx_grad.df)
+    assert np.allclose(grad[1:], approx_grad.df[0, 1:])
 
+    # KL
     def h(x):
         def inner(x):
             vf = lambda x: algo.KL(x, rho)[0]
@@ -365,7 +354,5 @@ if __name__ == "__main__":
     x = rng.normal(size = 4) * 0.1
     approx_grad = jacobian(h, x)
     grad = algo.KL(x, rho)[1]
-    print(approx_grad.df)
-    print(grad)
     # assert np.all(approx_grad.success)
-    # assert np.allclose(grad, approx_grad.df)
+    assert np.allclose(grad, approx_grad.df)

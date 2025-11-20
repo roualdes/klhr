@@ -25,7 +25,7 @@ class KLHR(MCMCBase):
                  warmup = 1_000,
                  windowsize = 50,
                  windowscale = 2,
-                 tol = 1e-12,
+                 tol = 1e-10,
                  grad_clip = 1e15,
                  scale_clip = 600,
                  scale_dir_cov = False,
@@ -76,8 +76,8 @@ class KLHR(MCMCBase):
 
     def _unpack(self, eta):
         m = eta[0]
-        log_mn, log_mx = -self._scale_clip, self._scale_clip
-        s = np.exp(np.clip(eta[1], log_mn, log_mx))
+        c = self._scale_clip
+        s = np.exp(np.clip(eta[1], -c, c)) + self._tol
         return m, s
 
     def _initialize(self):
@@ -96,8 +96,8 @@ class KLHR(MCMCBase):
 
     def _logp_grad(self, x):
         l, g = self.model.log_density_gradient(x)
-        mn, mx = -self._grad_clip, self._grad_clip
-        return l, np.clip(g, mn, mx)
+        c = self._grad_clip
+        return l, np.clip(g, -c, c)
 
     def KL(self, eta, rho):
         m, s = self._unpack(eta)
@@ -146,10 +146,10 @@ class KLHR(MCMCBase):
         rho = self.rng.multivariate_normal(m, S)
         return rho / np.linalg.norm(rho + self._tol)
 
-    def _logq(self, x, eta):
+    def _log_q(self, x, eta):
         m, s = self._unpack(eta)
         z = (x - m) / s
-        return -np.log(s) - 0.5 * z * z
+        return -eta[1] - 0.5 * z * z
 
     def _overrelaxed_proposal(self, eta):
         m, s = self._unpack(eta)
@@ -167,17 +167,17 @@ class KLHR(MCMCBase):
         return Normal.ppf(up)
 
     def _metropolis_step(self, eta, rho):
-        m, s = self._unpack(eta)
         if self._overrelaxed:
             zp = self._overrelaxed_proposal(eta)
         else:
+            m, s = self._unpack(eta)
             zp = self.rng.normal(loc = m, scale = s, size = 1)
         thetap = zp * rho + self.theta
 
         r = self.model.log_density(thetap)
         r -= self.model.log_density(self.theta)
-        r += self._logq(0, eta)
-        r -= self._logq(zp, eta)
+        r += self._log_q(0, eta)
+        r -= self._log_q(zp, eta)
 
         a = np.log(self.rng.uniform()) < np.minimum(0, r)
         self._prev_theta = self.theta
@@ -204,7 +204,7 @@ class KLHR(MCMCBase):
             self._eigvals[:self.J] = self._onlinepca.values()
             self._onlinepca.reset()
             K = self._smoothK.optimum()
-            self.K = int(np.clip(K, 1, 50)) # TODO needs testing
+            # self.K = int(np.clip(K, 1, 50)) # TODO needs testing
             self._smoothK.reset()
         else:
             _, g = self.model.log_density_gradient(theta)
