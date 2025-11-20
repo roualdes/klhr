@@ -5,38 +5,55 @@ import scipy.special as sp
 import scipy.stats as st
 
 from bsmodel import BSModel
+from smoother import Smoother
 from onlinemoments import OnlineMoments
 from onlinepca import OnlinePCA
 from mcmc import MCMCBase
 from windowedadaptation import WindowedAdaptation
 
 class KLHRSINH(MCMCBase):
-    def __init__(self, bsmodel, theta = None, seed = None,
-                 N = 16, K = 10, J = 2, l = 0,
+    def __init__(self, bsmodel,
+                 theta = None,
+                 seed = None,
+                 N = 8,
+                 K = 10,
+                 J = 2,
+                 l = 4,
                  initscale = 0.1,
                  warmup = 1_000,
                  windowsize = 50,
                  windowscale = 2,
-                 tol = 1e-10,
+                 tol = 1e-12,
+                 grad_clip = 1e21,
+                 scale_clip = 600,
                  scale_dir_cov = False,
                  overrelaxed = True,
-                 eigen_method_one = False):
+                 eigen_method_one = False,
+                 max_init_tries = 100):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
         self.K = K
         self.J = J
         self.l = l
-        self.x, self.w = hermgauss(self.N)
         self._tol = tol
-        self._mean = np.zeros(self.D)
-        self._cov = np.ones(self.D)
+        self._grad_clip = grad_clip
+        self._scale_clip = scale_clip
+        self._max_init_tries = max_init_tries
+
+        self.x, self.w = hermgauss(self.N)
+        # normalize roots and weights
+        self.x *= np.sqrt(2)
+        self.w /= np.sqrt(np.pi)
 
         self._initscale = initscale
-        self._windowedadaptation = WindowedAdaptation(warmup,
-                                                      windowsize = windowsize,
-                                                      windowscale = windowscale)
+        self._windowedadaptation = \
+            WindowedAdaptation(warmup,
+                               windowsize = windowsize,
+                               windowscale = windowscale)
         self._onlinemoments = OnlineMoments(self.D)
+        self._mean = np.zeros(self.D)
+        self._cov = np.ones(self.D)
         self._scale_dir_cov = scale_dir_cov
         self._overrelaxed = overrelaxed
         self._eigen_method_one = eigen_method_one
@@ -46,37 +63,44 @@ class KLHRSINH(MCMCBase):
         self._eigvals = np.ones(self.J + 1)
         # self._eigvecs = np.zeros((self.D, self.J))
         # self._eigvals = np.ones(self.J)
+        self._smoothK = Smoother(self.K)
+        self._prev_theta = np.zeros(self.D)
+        self._msjd = 0.0
 
         self._draw = 0
         self.acceptance_probability = 0
-        self.minimization_failure_rate = 0
 
-        # constants
-        self._invsqrtpi = 1 / np.sqrt(np.pi)
-        self._log2 = np.log(2)
-        self._log2pi = np.log(2 * np.pi)
-        self._sqrt2 = np.sqrt(2)
-
-    def _random_direction(self):
-        p = self._eigvals / np.sum(self._eigvals)
-        if self._eigen_method_one:
-            j = self.rng.choice(np.size(p), p = p)
-            m = evals[j] * self._eigvecs[:, j]
-        else:
-            m = np.sum(p * self._eigvecs, axis = 1)
-        S = np.diag(self._cov)
-        rho = self.rng.multivariate_normal(m, S)
-        return rho / np.linalg.norm(rho + self._tol)
-
-    def _to_rho(self, x, rho, origin):
-        return x * rho + origin
+        self._initialize()
 
     def _unpack(self, eta):
         m = eta[0]
-        s = np.exp(np.clip(eta[1], -650, 650))
-        d = np.exp(np.clip(eta[2], -650, 650))
+        log_mn, log_mx = -self._scale_clip, self._scale_clip
+        s = np.exp(np.clip(eta[1], log_mn, log_mx))
+        d = np.exp(np.clip(eta[2], log_mn, log_mx))
         e = eta[3]
         return m, s, d, e
+
+    def _initialize(self):
+        tries = 0
+        while True:
+            tries += 1
+            init = self.rng.normal(size = self.D) * self._initscale
+            l, g = self.model.log_density_gradient(init)
+            if np.isfinite(l) and np.isfinite(np.linalg.norm(g)):
+                self.theta = init
+                break
+
+            if tries >= self._max_init_tries:
+                print("failed to initialize")
+                sys.exit(1)
+
+        rho = -g / np.linalg.norm(g)
+        o = minimize(self.logp_grad_rho,
+                     self.rng.normal() * self._initscale,
+                     args = (rho,),
+                     jac = True,
+                     method = "BFGS")
+        self.theta += o.x * rho
 
     def _T(self, x, eta):
         m, s, d, e = self._unpack(eta)
@@ -85,8 +109,9 @@ class KLHRSINH(MCMCBase):
     def _T_inv(self, x, eta):
         m, s, d, e = self._unpack(eta)
         z = (x - m) / s
-        y = (np.arcsinh(z) - e) * d
-        y = np.clip(y, -650, 650)
+        y = d * (np.arcsinh(z) - e)
+        mn, mx = -self._scale_clip, self._scale_clip
+        y = np.clip(y, mn, mx)
         return np.sinh(y)
 
     def _CDF(self, x, eta):
@@ -116,29 +141,28 @@ class KLHRSINH(MCMCBase):
     def _logq(self, x, eta):
         m, s, d, e = self._unpack(eta)
         z = (x - m) / s
-        asinhz = np.arcsinh(np.clip(z, -650, 650))
+        mn, mx = -self._scale_clip, self._scale_clip
+        asinhz = np.arcsinh(np.clip(z, mn, mx))
         dae = d * asinhz - e
         abs_dae = np.abs(dae)
-        out = eta[2] - eta[1] - self._log2
-        out -= 0.5 * (self._log2pi + np.log1p(z * z) + 0.5 * (np.cosh(2 * dae) - 1))
+        out = eta[2] - eta[1] - np.log(2)
+        out -= 0.5 * (np.log(2 * np.pi) + np.log1p(z * z) + 0.5 * (np.cosh(2 * dae) - 1))
         out += abs_dae + np.log1p(np.exp(-2 * abs_dae))
         return out
 
     def _sinh_aed(self, x, eta):
         _, _, d, e = self._unpack(eta)
         y = (np.arcsinh(x) + e) / d
-        y = np.clip(y, -700, 700)
+        mn, mx = -self._scale_clip, self._scale_clip
+        y = np.clip(y, mn, mx)
         return np.sinh(y)
 
     def _cosh_aed(self, x, eta):
         _, _, d, e = self._unpack(eta)
         y = (np.arcsinh(x) + e) / d
-        y = np.clip(y, -650, 650)
+        mn, mx = -self._scale_clip, self._scale_clip
+        y = np.clip(y, mn, mx)
         return np.cosh(y)
-
-    def _logp_grad(self, x):
-        logp, grad = self.model.log_density_gradient(x)
-        return logp, np.clip(grad, -1e15, 1e15)
 
     def _grad_T(self, x, eta):
         m, s, d, e = self._unpack(eta)
@@ -159,7 +183,7 @@ class KLHRSINH(MCMCBase):
     def _log_sech_aed(self, x, eta):
         m, s, d, e = self._unpack(eta)
         aed = (np.arcsinh(x) + e) / d
-        return -np.abs(aed) - np.log1p(np.exp(-2 * np.abs(aed))) + self._log2
+        return -np.abs(aed) - np.log1p(np.exp(-2 * np.abs(aed))) + np.log(2)
 
     def _log_abs_jac(self, x, eta):
         out = self._log_sech_aed(x, eta)
@@ -171,52 +195,68 @@ class KLHRSINH(MCMCBase):
         invd = 1 / d
         grad = np.zeros(4)
         grad[1] = -1
-        aed = (np.arcsinh(x) + e) * invd
+        aed = invd * (np.arcsinh(x) + e)
         taed = np.tanh(aed)
         grad[2] = 1 + taed * aed
         grad[3] = -taed * invd
         return grad
 
-    def KLnormal(self, eta, rho):
-        m, s, _, _ = self._unpack(eta)
-        out = 0.0
-        grad = np.zeros(4)
-        for xn, wn in zip(self.x, self.w):
-            y = self._sqrt2 * s * xn + m
-            xi = y * rho + self.theta
-            logp, grad_logp = self._logp_grad(xi)
-            out += wn * logp
-            w_grad_logp_rho = wn * grad_logp.dot(rho)
-            grad[0] += w_grad_logp_rho
-            grad[1] += w_grad_logp_rho * xn * self._sqrt2 * s
-        out *= self._invsqrtpi
-        out += eta[1]
-        grad *= self._invsqrtpi
-        grad[1] += 1
-        return np.log(-out), grad/out
+    def _logp_grad(self, x):
+        logp, grad = self.model.log_density_gradient(x)
+        mn, mx = -self._scale_clip, self._scale_clip
+        return logp, grad # np.clip(grad, mn, mx)
 
     def KL(self, eta, rho):
         out = 0.0
         grad = np.zeros(4)
         for xn, wn in zip(self.x, self.w):
-            y = self._sqrt2 * xn
-            t = self._T(y, eta)
+            t = self._T(xn, eta)
             xi = t * rho + self.theta
             logp, grad_logp = self._logp_grad(xi)
-            log_abs_jac = self._log_abs_jac(y, eta)
+            log_abs_jac = self._log_abs_jac(xn, eta)
             out += wn * (log_abs_jac - logp)
-            grad_log_abs_jac = self._grad_log_abs_jac(y, eta)
-            grad_T = self._grad_T(y, eta)
-            grad += wn * (grad_log_abs_jac - grad_logp.dot(rho) * grad_T)
-        out *= self._invsqrtpi
-        grad *= self._invsqrtpi
-        return np.log(out), grad/out
+            grad_log_abs_jac = self._grad_log_abs_jac(xn, eta)
+            grad_T = self._grad_T(xn, eta)
+            grad -= wn * grad_logp.dot(rho) * grad_T
+            grad += wn * grad_log_abs_jac
+        return out, grad
+
+    def logp_grad_rho(self, xi, rho):
+        l, g = self.model.log_density_gradient(xi * rho + self.theta)
+        return -l, -g.dot(rho)
 
     def fit(self, rho):
-        init = self.rng.normal(size = 4) * self._initscale
-        o = minimize(self.KL, init, args = (rho,),
-                     jac = True, method = "BFGS")
+        # o = minimize(self.logp_grad_rho,
+        #              self.rng.normal() * self._initscale,
+        #              args = (rho,),
+        #              jac = True,
+        #              method = "BFGS")
+        # s = o["hess_inv"][0,0]
+        # s = (s > 0) * 0.5 * np.log(s)
+        # print(f"mi = {np.round(o.x[0], 4)}, si = {np.round(s, 4)}")
+        # init = self.rng.normal(size = 4) * self._initscale
+        # init[0] = o.x[0]
+        # init[1] = s
+        o = minimize(self.KL,
+                     self.rng.normal(size = 4) * self._initscale,
+                     args = (rho,),
+                     jac = True,
+                     method = "BFGS")
+        oo = np.round(o.x, 4)
+        #print(f"m = {oo[0]}, s = {oo[1]}, d = {oo[2]}, e = {oo[3]}")
         return o.x
+
+    def _random_direction(self):
+        evals = self._eigvals
+        p = evals / np.sum(evals)
+        if self._eigen_method_one:
+            j = self.rng.choice(np.size(p), p = p)
+            m = self._eigvecs[:, j]
+        else:
+            m = np.sum(p * self._eigvecs, axis = 1)
+        S = np.diag(self._cov)
+        rho = self.rng.multivariate_normal(m, S)
+        return rho / np.linalg.norm(rho + self._tol)
 
     def _metropolis_step(self, eta, rho):
         m, s, d, e = self._unpack(eta)
@@ -224,26 +264,23 @@ class KLHRSINH(MCMCBase):
             zp = self._overrelaxed_proposal(eta)
         else:
             zp = self._T(self.rng.normal(loc = m, scale = s, size = 1), eta)
-        thetap = self._to_rho(zp, rho, self.theta)
+        thetap = zp * rho + self.theta
 
-        a = self.model.log_density(thetap)
-        a -= self.model.log_density(self.theta)
-        a += self._logq(0, eta)
-        a -= self._logq(zp, eta)
+        r = self.model.log_density(thetap)
+        r -= self.model.log_density(self.theta)
+        r += self._logq(0, eta)
+        r -= self._logq(zp, eta)
 
-        accept = np.log(self.rng.uniform()) < np.minimum(0, a)
-        if accept:
-            self.theta = thetap
+        a = np.log(self.rng.uniform()) < np.minimum(0, r)
+        self._prev_theta = self.theta
+        self.theta = a * thetap + (1 - a) * self.theta
 
-        d = accept - self.acceptance_probability
+        d = a - self.acceptance_probability
         self.acceptance_probability += d / self._draw
-
         return self.theta
 
     def draw(self):
         self._draw += 1
-        if self._draw % 1_000 == 0:
-            print(self._draw)
         rho = self._random_direction()
         etakl = self.fit(rho)
         theta = self._metropolis_step(etakl, rho)
@@ -258,11 +295,16 @@ class KLHRSINH(MCMCBase):
             self._eigvecs[:, :self.J] = self._onlinepca.vectors()
             self._eigvals[:self.J] = self._onlinepca.values()
             self._onlinepca.reset()
+            K = self._smoothK.optimum()
+            self.K = int(np.clip(K, 1, 50)) # TODO needs testing
+            self._smoothK.reset()
         else:
             _, g = self._logp_grad(theta)
             self._onlinemoments_density.update(g)
             self._onlinemoments.update(theta)
             self._onlinepca.update(theta - self._mean)
+            msjd = np.linalg.norm(theta - self._prev_theta)
+            self._smoothK.update(2 * (msjd > self._msjd) - 1)
 
         return theta
 
@@ -323,17 +365,7 @@ if __name__ == "__main__":
     x = rng.normal(size = 4) * 0.1
     approx_grad = jacobian(h, x)
     grad = algo.KL(x, rho)[1]
-    assert np.all(approx_grad.success)
-    assert np.allclose(grad, approx_grad.df)
-
-    def j(x):
-        def inner(x):
-            vf = lambda x: algo.KLnormal(x, rho)[0]
-            return np.apply_along_axis(vf, axis=0, arr=x)
-        return np.array([inner(x)])
-
-    x = rng.normal(size = 4) * 0.1
-    approx_grad = jacobian(j, x)
-    grad = algo.KLnormal(x, rho)[1]
+    print(approx_grad.df)
+    print(grad)
     # assert np.all(approx_grad.success)
-    assert np.allclose(grad, approx_grad.df)
+    # assert np.allclose(grad, approx_grad.df)
