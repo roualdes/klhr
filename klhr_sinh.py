@@ -5,10 +5,10 @@ import scipy.special as sp
 import scipy.stats as st
 
 from bsmodel import BSModel
-from smoother import Smoother
 from onlinemoments import OnlineMoments
 from onlinepca import OnlinePCA
 from mcmc import MCMCBase
+from smoother import Smoother
 from windowedadaptation import WindowedAdaptation
 
 class KLHRSINH(MCMCBase):
@@ -24,8 +24,8 @@ class KLHRSINH(MCMCBase):
                  windowsize = 50,
                  windowscale = 2,
                  tol = 1e-10,
-                 grad_clip = 1e32,
-                 scale_clip = 600,
+                 grad_clip = 1e16,
+                 scale_clip = 500,
                  scale_dir_cov = False,
                  overrelaxed = True,
                  eigen_method_one = False,
@@ -177,18 +177,18 @@ class KLHRSINH(MCMCBase):
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
+
         s = o["hess_inv"][0,0]
         s = (s > 0) * 0.5 * np.log(s)
         init = self.rng.normal(size = 3) * self._initscale
         init[0] = o.x[0]
         init[1] = s
+
         o = minimize(self.KL,
                      init,
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
-        # oo = np.round(o.x, 4)
-        # print(f"m = {oo[0]}, s = {oo[1]}, e = {oo[2]}")
         return o.x
 
     def _random_direction(self):
@@ -205,7 +205,7 @@ class KLHRSINH(MCMCBase):
 
     def _overrelaxed_proposal(self, eta):
         K = self.K
-        u = self._CDF(0.0, eta)
+        u = self._CDF(np.zeros(1), eta)
         r = st.binom(K, u).rvs()
         up = 0
         if r > K - r:
@@ -216,32 +216,19 @@ class KLHRSINH(MCMCBase):
             up = 1 - (1 - u) * v
         elif r == K - r:
             up = u
-        return np.array([self._CDF_inv(up, eta)])
+        return self._CDF_inv(up, eta)
 
-    def _log_normal(self, x, eta):
-        m, s, _ = self._unpack(eta)
-        z = (x - m) / s
-        return -eta[1] - 0.5 * z * z
+    def _log_stdnormal(self, x):
+        return -0.5 * x * x
 
     def _log_q(self, x, eta):
         m, s, e = self._unpack(eta)
-        ld = self._log_normal(self._T_inv(x, eta), eta)
+        ld = self._log_stdnormal(self._T_inv(x, eta))
         z = (x - m) / s
         ld += np.log(self._cosh(np.arcsinh(z) - e))
         ld -= eta[1]
-        ld -= 0.5 * (np.log1p(z * z) + )
+        ld -= 0.5 * np.log1p(z * z)
         return ld
-
-    def _logq(self, x, eta):
-        m, s, e = self._unpack(eta)
-        z = (x - m) / s
-        asinhz = np.arcsinh(z)
-        dae = asinhz - e
-        abs_dae = np.abs(dae)
-        out = -eta[1] - np.log(2)
-        out -= 0.5 * (np.log1p(z * z) + 0.5 * (np.cosh(2 * dae) - 1))
-        out += abs_dae + np.log1p(np.exp(-2 * abs_dae))
-        return out
 
     def _metropolis_step(self, eta, rho):
         if self._overrelaxed:
@@ -356,6 +343,3 @@ if __name__ == "__main__":
     grad = algo.KL(x, rho)[1]
     # assert np.all(approx_grad.success)
     assert np.allclose(grad, approx_grad.df)
-
-    print(algo._logq(0.25, x))
-    print(algo._log_q(0.25, x))
