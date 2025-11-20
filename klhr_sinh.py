@@ -59,10 +59,12 @@ class KLHRSINH(MCMCBase):
         self._eigen_method_one = eigen_method_one
         self._onlinemoments_density = OnlineMoments(self.D)
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
-        self._eigvecs = np.zeros((self.D, self.J + 1))
-        self._eigvals = np.ones(self.J + 1)
-        # self._eigvecs = np.zeros((self.D, self.J))
-        # self._eigvals = np.ones(self.J)
+        if eigen_method_one:
+            self._eigvecs = np.zeros((self.D, self.J + 1))
+            self._eigvals = np.ones(self.J + 1)
+        else:
+            self._eigvecs = np.zeros((self.D, self.J))
+            self._eigvals = np.ones(self.J)
         self._smoothK = Smoother(self.K)
         self._prev_theta = np.zeros(self.D)
         self._msjd = 0.0
