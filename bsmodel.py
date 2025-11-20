@@ -29,14 +29,15 @@ class BSModel():
             pass
         return ld, grad
 
-    def log_density_hvp(self, theta, v, **kws):
+    def log_density_hessian(self, theta, **kws):
         ld = -np.inf
-        Hv = np.zeros_like(theta)
+        D = self.dim()
+        H = np.zeros((D, D))
         try:
-            ld, Hv = self.model.log_density_hessian_vector_product(theta, v)
+            ld, H = self.model.log_density_hessian(theta)
         except Exception as e:
             pass
-        return ld, Hv
+        return ld, H
 
     def dim(self):
         return self.model.param_unc_num()

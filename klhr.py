@@ -20,13 +20,13 @@ class KLHR(MCMCBase):
                  N = 8,
                  K = 10,
                  J = 2,
-                 l = 0,
+                 l = 4,
                  initscale = 0.1,
                  warmup = 1_000,
                  windowsize = 50,
                  windowscale = 2,
                  tol = 1e-12,
-                 grad_tol = 1e-15,
+                 grad_clip = 1e15,
                  scale_clip = 600,
                  scale_dir_cov = False,
                  overrelaxed = False,
@@ -39,8 +39,8 @@ class KLHR(MCMCBase):
         self.J = J if J < self.D else self.D - 1
         self.l = l
         self._tol = tol
-        self._grad_tol = grad_tol
-        self._scale_clip = 600
+        self._grad_clip = grad_clip
+        self._scale_clip = scale_clip
         self._max_init_tries = max_init_tries
 
         self.x, self.w = hermgauss(self.N)
@@ -66,7 +66,6 @@ class KLHR(MCMCBase):
         # self._eigvecs = np.zeros((self.D, self.J))
         # self._eigvals = np.ones(self.J)
         self._smoothK = Smoother(self.K)
-
         self._prev_theta = np.zeros(self.D)
         self._msjd = 0.0
 
@@ -97,7 +96,7 @@ class KLHR(MCMCBase):
 
     def _logp_grad(self, x):
         l, g = self.model.log_density_gradient(x)
-        mn, mx = -self._grad_tol, self._grad_tol
+        mn, mx = -self._grad_clip, self._grad_clip
         return l, np.clip(g, mn, mx)
 
     def KL(self, eta, rho):
@@ -107,7 +106,7 @@ class KLHR(MCMCBase):
         for xn, wn in zip(self.x, self.w):
             y = s * xn + m
             xi = y * rho + self.theta
-            logp, grad_logp = self._logp_grad(xi)
+            logp, grad_logp = self.model.log_density_gradient(xi)
             out += wn * logp
             w_grad_rho = wn * grad_logp.dot(rho)
             grad[0] += w_grad_rho
@@ -183,6 +182,7 @@ class KLHR(MCMCBase):
         a = np.log(self.rng.uniform()) < np.minimum(0, r)
         self._prev_theta = self.theta
         self.theta = a * thetap + (1 - a) * self.theta
+
         d = a - self.acceptance_probability
         self.acceptance_probability += d / self._draw
         return self.theta
