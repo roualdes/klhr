@@ -77,10 +77,13 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
 
     if verbose:
         print(f"Acceptance rate: {np.round(algo.acceptance_probability, 2)}")
-        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) for m in range(M-1)])
+        t = M - warmup # post warmup
+        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) \
+                        for m in range(t, M-1)])
         print(f"MSJD: {np.round(msjd, 2)}")
         print(np.mean(draws[warmup:, :], axis = 0))
         print(np.std(draws[warmup:, :], axis = 0))
+        print(f"Number gradients: {algo.grad_evals}")
 
 if __name__ == "__main__":
     main()

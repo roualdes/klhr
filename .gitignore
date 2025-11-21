@@ -219,3 +219,4 @@ stan/*
 *.png
 .DS_Store
 .juliahistory
+play.py
