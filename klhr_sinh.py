@@ -319,8 +319,6 @@ if __name__ == "__main__":
 
     import bridgestan as bs
     from bsmodel import BSModel
-    from klhr_sinh import KLHRSINH
-    from klhr import KLHR
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
