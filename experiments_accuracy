@@ -1,3 +1,0 @@
-#DISBATCH PREFIX ( source experiment_setup ; python experiment_accuracy.py
-#DISBATCH SUFFIX ) &> experiments/${DISBATCH_NAMETASKS}_${DISBATCH_JOBID}_${DISBATCH_TASKID_ZP}.log
- -M 1000 -w 0 klhr

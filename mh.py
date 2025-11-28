@@ -21,15 +21,13 @@ class MH(mcmc.MCMCBase):
             xi = self.rng.normal(size = self.D)
             thetap = self.theta + xi * self.stepsize
 
-            a = self.log_density(thetap)
-            a += self.proposal_density(self.theta, thetap)
-            a -= self.log_density(self.theta)
-            a -= self.proposal_density(thetap, self.theta)
+            r = self.log_density(thetap)
+            r -= self.log_density(self.theta)
+            r += self.proposal_density(self.theta, thetap)
+            r -= self.proposal_density(thetap, self.theta)
 
-            accept = np.log(self.rng.uniform()) < np.minimum(0.0, a)
-            if accept:
-                self.theta = thetap
-
+            accept = np.log(self.rng.uniform()) < np.minimum(0.0, r)
+            self.theta = a * thetap + (1 - a) * self.theta
             d = accept - self.acceptance_probability
             self.acceptance_probability += d / self._draw
 

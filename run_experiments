@@ -1,0 +1,27 @@
+J=1
+
+usage() {
+  echo "Usage: $0 [-J <value>] <experiment>"
+  echo "  -J <value>    Optional integer (defaults to 1)"
+  exit 1
+}
+
+while getopts ":J:" opt; do
+  case "$opt" in
+    J)
+      J="$OPTARG"
+      ;;
+    \?)
+      echo "Unknown option: -$OPTARG" >&2
+      usage
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      usage
+      ;;
+  esac
+done
+
+source ~/venvs/py3/bin/activate
+
+parallel -j"$J" :::: experiments.txt

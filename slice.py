@@ -10,6 +10,7 @@ from mcmc import MCMCBase
 from windowedadaptation import WindowedAdaptation
 
 class Slice(MCMCBase):
+    """Copied from https://glizen.com/radfordneal/slice.software.html"""
     def __init__(self,
                  bsmodel,
                  theta = None,

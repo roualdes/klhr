@@ -206,7 +206,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-experiments/
+experiments/output/
 output*
 *.yaml
 stan/*
@@ -219,3 +219,4 @@ stan/*
 *.png
 .DS_Store
 .juliahistory
+experiments.txt
