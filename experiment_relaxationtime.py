@@ -8,6 +8,7 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr_sinh import KLHRSINH
 from klhr import KLHR
+from slice import Slice
 
 @click.command()
 @click.option("-M", "--iterations", "M", type=int, default=2_000, help="number of iterations")
@@ -42,6 +43,16 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                     eigen_method_one = eigen_method_one)
     elif algorithm == "klhr_sinh":
         algo = KLHRSINH(bs_model,
+                        warmup = warmup,
+                        windowsize = windowsize,
+                        windowscale = windowscale,
+                        J = J,
+                        l = l,
+                        scale_dir_cov = scale_dir_cov,
+                        overrelaxed = overrelaxed,
+                        eigen_method_one = eigen_method_one)
+    elif algorithm == "slice":
+        algo = Slice(bs_model,
                         warmup = warmup,
                         windowsize = windowsize,
                         windowscale = windowscale,

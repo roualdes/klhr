@@ -8,6 +8,7 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr import KLHR
 from klhr_sinh import KLHRSINH
+from slice import Slice
 from mh import MH
 from onlinemoments import OnlineMoments
 
@@ -29,12 +30,32 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
                        data_file = source_dir / f"stan/{model}.json")
 
     if algorithm == "klhr":
-        algo = KLHR(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
-    elif algorithm == "klhrsinh":
-        algo = KLHRSINH(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
+
+        algo = KLHR(bs_model,
+                    warmup = warmup,
+                    scale_dir_cov = scale_dir_cov,
+                    overrelaxed = overrelaxed,
+                    eigen_method_one = eigen_method_one)
+
+    elif algorithm == "klhr_sinh":
+
+        algo = KLHRSINH(bs_model,
+                        warmup = warmup,
+                        scale_dir_cov = scale_dir_cov,
+                        overrelaxed = overrelaxed,
+                        eigen_method_one = eigen_method_one)
+
+    elif algorithm == "slice":
+
+        algo = Slice(bs_model,
+                     warmup = warmup,
+                     scale_dir_cov = scale_dir_cov,
+                     overrelaxed = overrelaxed,
+                     eigen_method_one = eigen_method_one)
+
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr or klhrsinh")
+        print("Available algorithms: klhr, klhr_sinh, or slice")
         sys.exit(0)
 
     mh = MH(bs_model, 0.09)
