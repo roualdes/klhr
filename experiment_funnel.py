@@ -37,7 +37,7 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
         algo = KLHRSINH(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr or klhrsinh")
+        print("Available algorithms: klhr or klhr_sinh")
         sys.exit(0)
 
     mdx = np.arange(M)

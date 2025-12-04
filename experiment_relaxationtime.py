@@ -63,7 +63,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                         eigen_method_one = eigen_method_one)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr or klhrsinh")
+        print("Available algorithms: klhr or klhr_sinh")
         sys.exit(0)
 
     draws = algo.sample(M)

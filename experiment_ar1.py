@@ -44,7 +44,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                     overrelaxed = overrelaxed,
                     eigen_method_one = eigen_method_one
                     )
-    elif algorithm == "klhrsinh":
+    elif algorithm == "klhr_sinh":
         algo = KLHRSINH(bs_model,
                         warmup = warmup,
                         windowsize = windowsize,
@@ -56,7 +56,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                         eigen_method_one = eigen_method_one)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr or klhrsinh")
+        print("Available algorithms: klhr or klhr_sinh")
         sys.exit(0)
 
     mdx = np.arange(M)
