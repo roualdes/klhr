@@ -20,7 +20,7 @@ def accuracy_experiment():
     """
 
     M = [10_000_000, ]
-    algos = ["klhr", "klhr_sinh"]
+    algos = ["klhr", "klhr_sinh", "sub_klhr_sinh","slice"]
     warmups = [0, M[0] // 2]
     scale_dir_covs = ["-s", " "]
     overrelaxed_flags = ["-o", " "]
@@ -70,12 +70,12 @@ def ar1_experiment():
 
     windowsizes = [25, 50]
     windowscales = [2,]
-    Js = [2, 4, 8, 10]
-    Ls = [0, 2, 4]
+    Js = [2]
+    Ls = [0]
     scale_dir_covs = ["-s", " "]
     overrelaxed_flags = ["-o", " "]
     eigen_method_one_flags = ["-e1", " "]
-    algos = ["klhr", "klhr_sinh"]
+    algos = ["klhr", "klhr_sinh", "sub_klhr_sinh", "slice"]
     reps = range(10)
 
     itrs = [
@@ -132,7 +132,7 @@ def funnel_experiment():
     scale_dir_covs = ["-s", " "]
     overrelaxed_flags = ["-o", " "]
     eigen_method_one_flags = ["-e1", " "]
-    algos = ["klhr", "klhr_sinh"]
+    algos = ["klhr", "klhr_sinh", "sub_klhr_sinh", "slice"]
 
     itrs = [
         M,
@@ -180,12 +180,12 @@ def relaxation_time_experiment():
 
     windowsizes = [25, 50]
     windowscales = [2,]
-    Js = [2, 3]
-    Ls = [0, 2, 4]
+    Js = [2]
+    Ls = [0]
     scale_dir_covs = ["-s", " "]
     overrelaxed_flags = ["-o", " "]
     eigen_method_one_flags = ["-e1", " "]
-    algos = ["klhr", "klhr_sinh"]
+    algos = ["klhr", "klhr_sinh", "sub_klhr_sinh", "slice"]
     reps = range(10)
 
     itrs = [
