@@ -8,6 +8,7 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr_sinh import KLHRSINH
 from klhr import KLHR
+from sub_klhr_sinh import SUBKLHRSINH
 from slice import Slice
 
 @click.command()
@@ -51,6 +52,16 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                         scale_dir_cov = scale_dir_cov,
                         overrelaxed = overrelaxed,
                         eigen_method_one = eigen_method_one)
+    elif algorithm == "sub_klhr_sinh":
+        algo = SUBKLHRSINH(bs_model,
+                        warmup = warmup,
+                        windowsize = windowsize,
+                        windowscale = windowscale,
+                        J = J,
+                        l = l,
+                        scale_dir_cov = scale_dir_cov,
+                        overrelaxed = overrelaxed,
+                        eigen_method_one = eigen_method_one)
     elif algorithm == "slice":
         algo = Slice(bs_model,
                         warmup = warmup,
@@ -63,7 +74,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                         eigen_method_one = eigen_method_one)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr or klhr_sinh")
+        print("Available algorithms: klhr, klhr_sinh, sub_klhr_sinh, or slice")
         sys.exit(0)
 
     draws = algo.sample(M)
@@ -83,7 +94,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
     axs[1, 1].set_ylabel(r"$s$")
 
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{windowsize}_{windowscale}_{l}_{J}_{rep:0>2}.png")
+    plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{windowsize}_{windowscale}_{l}_{J}_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_{rep:0>2}.png")
     plt.close()
 
     if verbose:

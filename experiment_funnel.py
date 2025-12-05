@@ -12,6 +12,8 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr import KLHR
 from klhr_sinh import KLHRSINH
+from sub_klhr_sinh import SUBKLHRSINH
+from slice import Slice
 from onlinemoments import OnlineMoments
 
 @click.command()
@@ -35,9 +37,13 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
         algo = KLHR(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
     elif algorithm == "klhr_sinh":
         algo = KLHRSINH(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
+    elif algorithm == "sub_klhr_sinh":
+        algo = SUBKLHRSINH(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
+    elif algorithm == "slice":
+        algo = Slice(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr or klhr_sinh")
+        print("Available algorithms: klhr, klhr_sinh, sub_klhr_sinh, or slice")
         sys.exit(0)
 
     mdx = np.arange(M)
@@ -55,7 +61,7 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
     plt.clf()
     plt.scatter(thetas[warmup:, 1], thetas[warmup:, 0], color = "#0072B2", alpha = 0.1)
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/funnel/scatter_{algorithm}.png")
+    plt.savefig(source_dir / f"experiments/funnel/scatter_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_{algorithm}.png")
 
     plt.clf()
     plt.hist(thetas[warmup:, 0], histtype = "step", density = True, linewidth = 2)
@@ -63,7 +69,7 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
     x = np.linspace(-10, 10, 101)
     plt.plot(x, Normal.pdf(x), color = "#D55E00")
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/funnel/histogram_{algorithm}.png")
+    plt.savefig(source_dir / f"experiments/funnel/histogram_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_{algorithm}.png")
     plt.close()
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr import KLHR
 from klhr_sinh import KLHRSINH
+from sub_klhr_sinh import SUBKLHRSINH
 from slice import Slice
 from mh import MH
 from onlinemoments import OnlineMoments
@@ -44,6 +45,13 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
                         scale_dir_cov = scale_dir_cov,
                         overrelaxed = overrelaxed,
                         eigen_method_one = eigen_method_one)
+    elif algorithm == "sub_klhr_sinh":
+        
+        algo = SUBKLHRSINH(bs_model,
+                     warmup = warmup,
+                     scale_dir_cov = scale_dir_cov,
+                     overrelaxed = overrelaxed,
+                     eigen_method_one = eigen_method_one)
 
     elif algorithm == "slice":
 
@@ -55,7 +63,7 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
 
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr, klhr_sinh, or slice")
+        print("Available algorithms: klhr, klhr_sinh, sub_klhr_sinh, or slice")
         sys.exit(0)
 
     mh = MH(bs_model, 0.09)
@@ -143,7 +151,7 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
     plt.xlabel("iteration")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_rmse.png")
+    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_rmse.png")
 
     plt.clf()
     plt.rc('axes', labelsize = 12)
@@ -153,7 +161,7 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
     plt.xlabel("log_density")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_histogram_log_density.png")
+    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_histogram_log_density.png")
     plt.close()
 
 if __name__ == "__main__":

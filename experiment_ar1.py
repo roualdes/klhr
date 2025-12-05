@@ -9,6 +9,8 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr import KLHR
 from klhr_sinh import KLHRSINH
+from sub_klhr_sinh import SUBKLHRSINH
+from slice import Slice
 from onlinemoments import OnlineMoments
 
 @click.command()
@@ -54,9 +56,29 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                         scale_dir_cov = scale_dir_cov,
                         overrelaxed = overrelaxed,
                         eigen_method_one = eigen_method_one)
+    elif algorithm == "sub_klhr_sinh":
+        algo = SUBKLHRSINH(bs_model,
+                        warmup = warmup,
+                        windowsize = windowsize,
+                        windowscale = windowscale,
+                        l = l,
+                        J = J,
+                        scale_dir_cov = scale_dir_cov,
+                        overrelaxed = overrelaxed,
+                        eigen_method_one = eigen_method_one)
+    elif algorithm == "slice":
+        algo = Slice(bs_model,
+                        warmup = warmup,
+                        windowsize = windowsize,
+                        windowscale = windowscale,
+                        l = l,
+                        J = J,
+                        scale_dir_cov = scale_dir_cov,
+                        overrelaxed = overrelaxed,
+                        eigen_method_one = eigen_method_one)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr or klhr_sinh")
+        print("Available algorithms: klhr, klhr_sinh, sub_klhr_sinh, or slice")
         sys.exit(0)
 
     mdx = np.arange(M)
@@ -92,7 +114,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
     plt.plot(x, fx, linestyle = "dashed", color = "#D55E00")
     plt.title(f"RMSE(mean) = {rmse_mean:.4f}, RMSE(var) = {rmse_var:.4f}")
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/ar1/{algorithm}_{windowsize}_{windowscale}_{l}_{J}_{rep:0>2}.png")
+    plt.savefig(source_dir / f"experiments/ar1/{algorithm}_{windowsize}_{windowscale}_{l}_{J}_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_{rep:0>2}.png")
     plt.close()
 
 if __name__ == "__main__":
