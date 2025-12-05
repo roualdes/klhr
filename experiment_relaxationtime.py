@@ -92,6 +92,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
         print(f"MSJD: {np.round(msjd, 2)}")
         print(np.mean(draws[warmup:, :], axis = 0))
         print(np.std(draws[warmup:, :], axis = 0))
+        print(f"Number gradients: {algo.grad_evals}")
 
 if __name__ == "__main__":
     main()

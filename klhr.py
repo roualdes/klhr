@@ -74,6 +74,7 @@ class KLHR(MCMCBase):
 
         self._draw = 0
         self.acceptance_probability = 0
+        self.grad_evals = 0
 
         self._initialize()
 
@@ -128,6 +129,7 @@ class KLHR(MCMCBase):
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
+        self.grad_evals += o["nfev"]
         s = o["hess_inv"][0, 0]
         init = np.array([o.x[0], (s > 0) * 0.5 * np.log(s)])
         o = minimize(self.KL,
@@ -135,6 +137,7 @@ class KLHR(MCMCBase):
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
+        self.grad_evals += o["nfev"] * self.N
         return o.x
 
     def _random_direction(self):
