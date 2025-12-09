@@ -9,7 +9,9 @@ class BSModel():
         self._data_file = data_file
         self.model = bs.StanModel(self._stan_file,
                                   data = self._data_file,
-                                  make_args=["STAN_THREADS=True"],
+                                  make_args=["STAN_THREADS=False",
+                                             "CXXFLAGS += -march=native",
+                                             "STANCFLAGS+= --warn-pedantic --O1"],
                                   warn = warn)
 
     def log_density(self, theta, **kws):

@@ -199,6 +199,9 @@ class SUBKLHRSINH(MCMCBase):
         if self._eigen_method_one:
             j = self.rng.choice(np.size(p), p = p)
             m = self._eigvecs[:, j]
+            # TODO have you tried?
+            # m = evals[j] * self._eigvecs[:, j]
+            # with or without sqrt(self._eigvals) from above?
         else:
             m = np.sum(p * self._eigvecs, axis = 1)
         S = np.diag(self._cov)
