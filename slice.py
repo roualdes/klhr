@@ -25,14 +25,10 @@ class Slice(MCMCBase):
                  warmup = 1_000,
                  windowsize = 50,
                  windowscale = 2,
-                 tol = 1e-12,
-                 scale_dir_cov = False,
-                 overrelaxed = False,
-                 eigen_method_one = True,
+                 tol = 1e-10,
                  max_init_tries = 100):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
-        # TODO checks
         self.w = w
         self.m = m
         self.lower = lower
@@ -50,20 +46,13 @@ class Slice(MCMCBase):
         self._onlinemoments = OnlineMoments(self.D)
         self._mean = np.zeros(self.D)
         self._cov = np.ones(self.D)
-        self._scale_dir_cov = scale_dir_cov
-        self._eigen_method_one = eigen_method_one
-        self._onlinemoments_density = OnlineMoments(self.D)
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
-        if eigen_method_one:
-            self._eigvecs = np.zeros((self.D, self.J + 1))
-            self._eigvals = np.ones(self.J + 1)
-        else:
-            self._eigvecs = np.zeros((self.D, self.J))
-            self._eigvals = np.ones(self.J)
+        self._eigvecs = np.zeros((self.D, self.J + 1))
+        self._eigvals = np.ones(self.J + 1)
 
         self._draw = 0
         self.acceptance_probability = 0
-        # TODO self.ld_evaluations = 0
+        self.ld_evals = 0
 
         self._initialize()
 
@@ -72,8 +61,8 @@ class Slice(MCMCBase):
         while True:
             tries += 1
             init = self.rng.normal(size = self.D) * self._initscale
-            l, g = self.model.log_density_gradient(init)
-            if np.isfinite(l) and np.isfinite(np.linalg.norm(g)):
+            l = self.model.log_density(init)
+            if np.isfinite(l):
                 self.theta = init
                 break
 
@@ -83,7 +72,7 @@ class Slice(MCMCBase):
 
     def _uni_slice(self, rho):
         def logp_rho(x):
-            xi = rho * x + self.theta
+            xi = x * rho + self.theta
             return self.model.log_density(xi)
         x0 = 0.0 # => self.theta
         gx0 = logp_rho(x0)
@@ -97,13 +86,13 @@ class Slice(MCMCBase):
             while True:
                 if L <= self.lower: break
                 gL = logp_rho(L)
-                # TODO self.ld_evaluations += 1
+                self.ld_evals += 1
                 if gL <= logy: break
                 L -= self.w
             while True:
                 if R >= self.upper: break
                 gR =  logp_rho(R)
-                # TODO self.ld_evaluations += 1
+                self.ld_evals += 1
                 if gR <= logy: break
                 R += self.w
         elif m > 1:
@@ -112,14 +101,14 @@ class Slice(MCMCBase):
             while J > 0:
                 if L <= self.lower: break
                 gL = logp_rho(L)
-                # TODO self.ld_evaluations += 1
+                self.ld_evals += 1
                 if gL <= logy: break
                 L -= self.w
                 J -= 1
             while K > 0:
                 if R >= self.upper: break
                 gR = logp_rho(R)
-                # TODO self.ld_evaluations += 1
+                self.ld_evals += 1
                 if gR <= logy: break
                 R += w
                 K -= 1
@@ -132,7 +121,7 @@ class Slice(MCMCBase):
         while True:
             x1 = self.rng.uniform(low = L, high = R)
             gx1 = logp_rho(x1)
-            # TODO self.ld_evaluations += 1
+            self.ld_evals += 1
             if gx1 >= logy: break
             if x1 > x0:
                 R = x1
@@ -140,7 +129,7 @@ class Slice(MCMCBase):
                 L = x1
 
         # update the point sampled
-        self.theta = rho * x1 + self.theta
+        self.theta = x1 * rho + self.theta
         self.acceptance_probability += \
             (1 - self.acceptance_probability) / self._draw
         return self.theta
@@ -148,11 +137,8 @@ class Slice(MCMCBase):
     def _random_direction(self):
         evals = self._eigvals
         p = evals / np.sum(evals)
-        if self._eigen_method_one:
-            j = self.rng.choice(np.size(p), p = p)
-            m = self._eigvecs[:, j]
-        else:
-            m = np.sum(evals * self._eigvecs, axis = 1)
+        j = self.rng.choice(np.size(p), p = p)
+        m = self._eigvecs[:, j]
         S = np.diag(self._cov)
         rho = self.rng.multivariate_normal(m, S)
         return rho / np.linalg.norm(rho + self._tol)
@@ -165,19 +151,13 @@ class Slice(MCMCBase):
         if self._windowedadaptation.window_closed(self._draw):
             self._mean = self._onlinemoments.mean()
             self._cov = self._onlinemoments.var()
-            if self._scale_dir_cov:
-                self._cov /= (self._tol + self._onlinemoments_density.var())
-            self._onlinemoments_density.reset()
             self._onlinemoments.reset()
             self._eigvecs[:, :self.J] = self._onlinepca.vectors()
             self._eigvals[:self.J] = self._onlinepca.values()
             self._onlinepca.reset()
         else:
-            _, g = self.model.log_density_gradient(theta)
-            self._onlinemoments_density.update(g)
             self._onlinemoments.update(theta)
             self._onlinepca.update(theta - self._mean)
-
         return theta
 
 if __name__ == "__main__":

@@ -12,19 +12,16 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr import KLHR
 from klhr_sinh import KLHRSINH
-from sub_klhr_sinh import SUBKLHRSINH
+from klhr_sub_sinh import KLHRSUBSINH
 from slice import Slice
 from onlinemoments import OnlineMoments
 
 @click.command()
 @click.option("-M", "--iterations", "M", type=int, default=1_000, help="number of iterations")
-@click.option("-w", "--warmup", "warmup", type=int, default=100, help="number of warmup iterations")
+@click.option("-w", "--warmup", "warmup", type=int, default=0, help="number of warmup iterations")
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
-@click.option("-s", "--scale_dir_cov", "scale_dir_cov", is_flag=True, help="scale covariance matrix used to select a random direction")
-@click.option("-o", "--overrelaxed", "overrelaxed", is_flag=True, help="use overrelaxed proposals in metropolis step")
-@click.option("-e1", "--eigen_method_one", "eigen_method_one", is_flag=True, help="Use option one for utilizing eigenvectors to select a direction")
 @click.argument("algorithm", type=str)
-def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algorithm):
+def main(M, warmup, verbose, algorithm):
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
@@ -34,42 +31,44 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
                        data_file = source_dir / f"stan/{model}.json")
 
     if algorithm == "klhr":
-        algo = KLHR(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
+        algo = KLHR(bs_model, warmup = warmup)
     elif algorithm == "klhr_sinh":
-        algo = KLHRSINH(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
-    elif algorithm == "sub_klhr_sinh":
-        algo = SUBKLHRSINH(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
+        algo = KLHRSINH(bs_model, warmup = warmup)
+    elif algorithm == "klhr_sub_sinh":
+        algo = KLHRSUBSINH(bs_model, warmup = warmup)
     elif algorithm == "slice":
-        algo = Slice(bs_model, warmup = warmup, scale_dir_cov = scale_dir_cov, overrelaxed = overrelaxed, eigen_method_one = eigen_method_one)
+        algo = Slice(bs_model, warmup = warmup)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr, klhr_sinh, sub_klhr_sinh, or slice")
+        print("Available algorithms: klhr, klhr_sinh, klhr_sub_sinh, or slice")
         sys.exit(0)
 
     mdx = np.arange(M)
-    thetas = np.zeros((M, algo.D))
-    for m in mdx:
-        thetas[m] = algo.draw()
+    draws = algo.sample(M)
 
     if verbose:
         print(f"Acceptance rate: {algo.acceptance_probability}")
-        # print(f"Minimization failure rate: {algo.minimization_failure_rate}")
-
-    # df = pd.DataFrame(thetas, columns = algo.model.parameter_names())
-    # df.to_parquet(source_dir / f"experiments/funnel/{algorithm}.parquet")
+        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) for m in range(M-1)])
+        print(f"MSJD: {np.round(msjd, 2)}")
+        if algorithm == "slice":
+            print(f"#ld evals: {algo.ld_evals}")
+        else:
+            print(f"#ldg evals: {algo.grad_evals}")
 
     plt.clf()
-    plt.scatter(thetas[warmup:, 1], thetas[warmup:, 0], color = "#0072B2", alpha = 0.1)
+    plt.scatter(draws[warmup:, 1], draws[warmup:, 0],
+                color = "#0072B2", alpha = 0.1)
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/funnel/scatter_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_{algorithm}.png")
+    plt.savefig(source_dir / f"experiments/funnel/scatter_{algorithm}.png")
 
     plt.clf()
-    plt.hist(thetas[warmup:, 0], histtype = "step", density = True, linewidth = 2)
+    plt.hist(draws[warmup:, 0], histtype = "step",
+             density = True, linewidth = 2)
     Normal = st.norm(loc = 0, scale = 3)
     x = np.linspace(-10, 10, 101)
     plt.plot(x, Normal.pdf(x), color = "#D55E00")
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/funnel/histogram_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_{algorithm}.png")
+    plt.savefig(source_dir / f"experiments/funnel/histogram_{algorithm}.png")
     plt.close()
 
 if __name__ == "__main__":

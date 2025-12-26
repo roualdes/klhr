@@ -5,13 +5,12 @@ import scipy.special as sp
 import scipy.stats as st
 
 from bsmodel import BSModel
-from smoother import Smoother
 from onlinemoments import OnlineMoments
 from onlinepca import OnlinePCA
 from mcmc import MCMCBase
 from windowedadaptation import WindowedAdaptation
 
-class SUBKLHRSINH(MCMCBase):
+class KLHRSUBSINH(MCMCBase):
     def __init__(self, bsmodel,
                  theta = None,
                  seed = None,
@@ -26,9 +25,6 @@ class SUBKLHRSINH(MCMCBase):
                  tol = 1e-10,
                  grad_clip = 1e15,
                  scale_clip = 300,
-                 scale_dir_cov = False,
-                 overrelaxed = True,
-                 eigen_method_one = False,
                  max_init_tries = 100):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
@@ -54,20 +50,9 @@ class SUBKLHRSINH(MCMCBase):
         self._onlinemoments = OnlineMoments(self.D)
         self._mean = np.zeros(self.D)
         self._cov = np.ones(self.D)
-        self._scale_dir_cov = scale_dir_cov
-        self._overrelaxed = overrelaxed
-        self._eigen_method_one = eigen_method_one
-        self._onlinemoments_density = OnlineMoments(self.D)
         self._onlinepca = OnlinePCA(self.D, K = self.J, l = self.l)
-        if eigen_method_one:
-            self._eigvecs = np.zeros((self.D, self.J + 1))
-            self._eigvals = np.ones(self.J + 1)
-        else:
-            self._eigvecs = np.zeros((self.D, self.J))
-            self._eigvals = np.ones(self.J)
-        self._smoothK = Smoother(self.K)
-        self._prev_theta = np.zeros(self.D)
-        self._msjd = 0.0
+        self._eigvecs = np.zeros((self.D, self.J + 1))
+        self._eigvals = np.ones(self.J + 1)
 
         self._draw = 0
         self.acceptance_probability = 0
@@ -196,14 +181,8 @@ class SUBKLHRSINH(MCMCBase):
     def _random_direction(self):
         evals = self._eigvals
         p = evals / np.sum(evals)
-        if self._eigen_method_one:
-            j = self.rng.choice(np.size(p), p = p)
-            m = self._eigvecs[:, j]
-            # TODO have you tried?
-            # m = evals[j] * self._eigvecs[:, j]
-            # with or without sqrt(self._eigvals) from above?
-        else:
-            m = np.sum(p * self._eigvecs, axis = 1)
+        j = self.rng.choice(np.size(p), p = p)
+        m = self._eigvecs[:, j]
         S = np.diag(self._cov)
         rho = self.rng.multivariate_normal(m, S)
         return rho / np.linalg.norm(rho + self._tol)
@@ -236,10 +215,7 @@ class SUBKLHRSINH(MCMCBase):
         return ld
 
     def _metropolis_step(self, eta, rho):
-        if self._overrelaxed:
-            zp = self._overrelaxed_proposal(eta)
-        else:
-            zp = self._T(self.rng.normal(size = 1), eta)
+        zp = self._overrelaxed_proposal(eta)
         thetap = zp * rho + self.theta
 
         r = self.model.log_density(thetap)
@@ -257,8 +233,6 @@ class SUBKLHRSINH(MCMCBase):
 
     def draw(self):
         self._draw += 1
-        if self._draw % 5_000 == 0:
-            print(self._draw)
         rho = self._random_direction()
         etakl = self.fit(rho)
         theta = self._metropolis_step(etakl, rho)
@@ -266,23 +240,13 @@ class SUBKLHRSINH(MCMCBase):
         if self._windowedadaptation.window_closed(self._draw):
             self._mean = self._onlinemoments.mean()
             self._cov = self._onlinemoments.var()
-            if self._scale_dir_cov:
-                self._cov /= (self._tol + self._onlinemoments_density.var())
-            self._onlinemoments_density.reset()
             self._onlinemoments.reset()
             self._eigvecs[:, :self.J] = self._onlinepca.vectors()
             self._eigvals[:self.J] = self._onlinepca.values()
             self._onlinepca.reset()
-            K = self._smoothK.optimum()
-            # self.K = int(np.clip(K, 1, 50)) # TODO needs testing
-            self._smoothK.reset()
         else:
-            _, g = self._logp_grad(theta)
-            self._onlinemoments_density.update(g)
             self._onlinemoments.update(theta)
             self._onlinepca.update(theta - self._mean)
-            msjd = np.linalg.norm(theta - self._prev_theta)
-            self._smoothK.update(2 * (msjd > self._msjd) - 1)
 
         return theta
 

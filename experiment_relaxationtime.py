@@ -8,23 +8,16 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr_sinh import KLHRSINH
 from klhr import KLHR
-from sub_klhr_sinh import SUBKLHRSINH
+from klhr_sub_sinh import KLHRSUBSINH
 from slice import Slice
 
 @click.command()
-@click.option("-M", "--iterations", "M", type=int, default=2_000, help="number of iterations")
-@click.option("-w", "--warmup", "warmup", type=int, default=1_000, help="set value from which RMSEs are plot")
-@click.option("--windowsize", "windowsize", type=int, default=50, help="set window size")
-@click.option("--windowscale", "windowscale", type=int, default=2, help="set window scale")
-@click.option("-l", "--amnesia", "l", type=int, default=0, help="set the amnesia parameter for OnlinePCA")
-@click.option("-J", "J", type=int, default=2, help="number of eigenvectors")
+@click.option("-M", "--iterations", "M", type=int, default=2_000, help="number of iterations, including warmup")
+@click.option("-w", "--warmup", "warmup", type=int, default=1_000, help="number of warmup iterations")
 @click.option("-r", "--replication", "rep", type=int, default=0, help="replication number for naming output files")
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
-@click.option("-s", "--scale_dir_cov", "scale_dir_cov", is_flag=True, help="scale covariance matrix used to select a random direction")
-@click.option("-o", "--overrelaxed", "overrelaxed", is_flag=True, help="use overrelaxed proposals in metropolis step")
-@click.option("-e1", "--eigen_method_one", "eigen_method_one", is_flag=True, help="Use option one for utilizing eigenvectors to select a direction")
 @click.argument("algorithm", type=str)
-def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algorithm):
+def main(M, warmup, rep, verbose, algorithm):
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
     model = "earnings"
@@ -33,48 +26,16 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
                        data_file = source_dir / f"stan/{model}.json")
 
     if algorithm == "klhr":
-        algo = KLHR(bs_model,
-                    warmup = warmup,
-                    windowsize = windowsize,
-                    windowscale = windowscale,
-                    J = J,
-                    l = l,
-                    scale_dir_cov = scale_dir_cov,
-                    overrelaxed = overrelaxed,
-                    eigen_method_one = eigen_method_one)
+        algo = KLHR(bs_model, warmup = warmup)
     elif algorithm == "klhr_sinh":
-        algo = KLHRSINH(bs_model,
-                        warmup = warmup,
-                        windowsize = windowsize,
-                        windowscale = windowscale,
-                        J = J,
-                        l = l,
-                        scale_dir_cov = scale_dir_cov,
-                        overrelaxed = overrelaxed,
-                        eigen_method_one = eigen_method_one)
-    elif algorithm == "sub_klhr_sinh":
-        algo = SUBKLHRSINH(bs_model,
-                        warmup = warmup,
-                        windowsize = windowsize,
-                        windowscale = windowscale,
-                        J = J,
-                        l = l,
-                        scale_dir_cov = scale_dir_cov,
-                        overrelaxed = overrelaxed,
-                        eigen_method_one = eigen_method_one)
+        algo = KLHRSINH(bs_model, warmup = warmup)
+    elif algorithm == "klhr_sub_sinh":
+        algo = KLHRSUBSINH(bs_model, warmup = warmup)
     elif algorithm == "slice":
-        algo = Slice(bs_model,
-                        warmup = warmup,
-                        windowsize = windowsize,
-                        windowscale = windowscale,
-                        J = J,
-                        l = l,
-                        scale_dir_cov = scale_dir_cov,
-                        overrelaxed = overrelaxed,
-                        eigen_method_one = eigen_method_one)
+        algo = Slice(bs_model, warmup = warmup)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr, klhr_sinh, sub_klhr_sinh, or slice")
+        print("Available algorithms: klhr, klhr_sinh, klhr_sub_sinh, or slice")
         sys.exit(0)
 
     draws = algo.sample(M)
@@ -94,7 +55,7 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
     axs[1, 1].set_ylabel(r"$s$")
 
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{windowsize}_{windowscale}_{l}_{J}_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_{rep:0>2}.png")
+    plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{rep:0>2}.png")
     plt.close()
 
     if verbose:
@@ -103,7 +64,10 @@ def main(M, warmup, windowsize, windowscale, l, J, rep, verbose, scale_dir_cov, 
         print(f"MSJD: {np.round(msjd, 2)}")
         print(np.mean(draws[warmup:, :], axis = 0))
         print(np.std(draws[warmup:, :], axis = 0))
-        print(f"Number gradients: {algo.grad_evals}")
+        if algorithm == "slice":
+            print(f"#ld evals: {algo.ld_evals}")
+        else:
+            print(f"#ldg evals: {algo.grad_evals}")
 
 if __name__ == "__main__":
     main()

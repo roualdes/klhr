@@ -9,10 +9,10 @@ class MH(mcmc.MCMCBase):
         super().__init__(model, stepsize, seed = seed, theta = theta)
         self._draw = 0
         self.acceptance_probability = 0
+        self._ld_evals = 0
 
     def proposal_density(self, thetap, theta):
-        stepsize = self.stepsize
-        z = (thetap - theta) / stepsize
+        z = (thetap - theta) / self.stepsize
         return -0.5 * z.dot(z)
 
     def draw(self):
@@ -23,8 +23,8 @@ class MH(mcmc.MCMCBase):
 
             r = self.log_density(thetap)
             r -= self.log_density(self.theta)
-            r += self.proposal_density(self.theta, thetap)
-            r -= self.proposal_density(thetap, self.theta)
+            # r += self.proposal_density(self.theta, thetap)
+            # r -= self.proposal_density(thetap, self.theta)
 
             a = np.log(self.rng.uniform()) < np.minimum(0.0, r)
             self.theta = a * thetap + (1 - a) * self.theta

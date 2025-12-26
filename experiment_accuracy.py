@@ -8,20 +8,17 @@ import bridgestan as bs
 from bsmodel import BSModel
 from klhr import KLHR
 from klhr_sinh import KLHRSINH
-from sub_klhr_sinh import SUBKLHRSINH
+from klhr_sub_sinh import KLHRSUBSINH
 from slice import Slice
 from mh import MH
 from onlinemoments import OnlineMoments
 
 @click.command()
 @click.option("-M", "--iterations", "M", type=int, default=1_000, help="number of iterations")
-@click.option("-w", "--warmup", "warmup", type=int, default=100, help="set value from which RMSEs are plot")
+@click.option("-w", "--warmup", "warmup", type=int, default=0, help="set value from which RMSEs are plot")
 @click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
-@click.option("-s", "--scale_dir_cov", "scale_dir_cov", is_flag=True, help="scale covariance matrix used to select a random direction")
-@click.option("-o", "--overrelaxed", "overrelaxed", is_flag=True, help="use overrelaxed proposals in metropolis step")
-@click.option("-e1", "--eigen_method_one", "eigen_method_one", is_flag=True, help="Use option one for utilizing eigenvectors to select a direction")
 @click.argument("algorithm", type=str)
-def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algorithm):
+def main(M, warmup, verbose, algorithm):
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
@@ -32,41 +29,23 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
 
     if algorithm == "klhr":
 
-        algo = KLHR(bs_model,
-                    warmup = warmup,
-                    scale_dir_cov = scale_dir_cov,
-                    overrelaxed = overrelaxed,
-                    eigen_method_one = eigen_method_one)
+        algo = KLHR(bs_model, warmup = warmup)
+
 
     elif algorithm == "klhr_sinh":
-
-        algo = KLHRSINH(bs_model,
-                        warmup = warmup,
-                        scale_dir_cov = scale_dir_cov,
-                        overrelaxed = overrelaxed,
-                        eigen_method_one = eigen_method_one)
-    elif algorithm == "sub_klhr_sinh":
-        
-        algo = SUBKLHRSINH(bs_model,
-                     warmup = warmup,
-                     scale_dir_cov = scale_dir_cov,
-                     overrelaxed = overrelaxed,
-                     eigen_method_one = eigen_method_one)
-
+        algo = KLHRSINH(bs_model, warmup = warmup)
+    elif algorithm == "klhr_sub_sinh":
+        algo = KLHRSUBSINH(bs_model, warmup = warmup)
     elif algorithm == "slice":
-
-        algo = Slice(bs_model,
-                     warmup = warmup,
-                     scale_dir_cov = scale_dir_cov,
-                     overrelaxed = overrelaxed,
-                     eigen_method_one = eigen_method_one)
-
+        algo = Slice(bs_model, warmup = warmup)
     else:
         print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr, klhr_sinh, sub_klhr_sinh, or slice")
+        print("Available algorithms: klhr, klhr_sinh, klhr_sub_sinh, or slice")
         sys.exit(0)
 
-    mh = MH(bs_model, 0.09)
+    # when D = 2 => stepsize = 2.4
+    # when D = 100 => stepsize = 0.24
+    mh = MH(bs_model, 0.24)
 
     stats_klhr = {
         "om": OnlineMoments(algo.D),
@@ -88,16 +67,17 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
     log_density_iid = np.zeros(M)
 
     mdx = np.arange(M)
-    draws = algo.sample(M)
+    klhr_draws = algo.sample(M)
+    mh_draws = mh.sample(M)
 
     for m in mdx:
-        theta = draws[m]
+        theta = klhr_draws[m]
         stats_klhr["om"].update(theta)
         stats_klhr["rmse_mean"][m] = np.sqrt(np.mean( stats_klhr["om"].mean() ** 2) )
         stats_klhr["rmse_var"][m] = np.sqrt(np.mean( (stats_klhr["om"].var() - 1) ** 2 ))
         stats_klhr["log_density"][m] = bs_model.log_density(theta)
 
-        theta = mh.draw()
+        theta = mh_draws[m]
         stats_mh["om"].update(theta)
         stats_mh["rmse_mean"][m] = np.sqrt(np.mean( stats_mh["om"].mean() ** 2) )
         stats_mh["rmse_var"][m] = np.sqrt(np.mean( (stats_mh["om"].var() - 1) ** 2 ))
@@ -107,40 +87,45 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
         log_density_iid[m] = bs_model.log_density(x)
 
     if verbose:
-        print(f"Acceptance rate: {algo.acceptance_probability}")
-        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) for m in range(M-1)])
-        print(f"MSJD: {np.round(msjd, 2)}")
-        print(f"means: {stats_klhr['om'].mean()}")
-        print(f"vars: {stats_klhr['om'].var()}")
+        print(f"MH acceptance probability: {mh.acceptance_probability}")
+        mh_msjd = np.mean([np.linalg.norm(mh_draws[m+1] - mh_draws[m]) for m in range(M-1)])
+        print(f"MSJD: {np.round(mh_msjd, 2)}")
+        print(f"#ld evals: {mh._ld_evals}")
 
-    # df = pd.DataFrame.from_dict({
-    #     "iteration": mdx + 1,
-
-    #     "rmse_mean_klhr": stats_klhr["rmse_mean"],
-    #     "rmse_var_klhr": stats_klhr["rmse_var"],
-    #     "log_density_klhr": stats_klhr["log_density"],
-
-    #     "rmse_mean_mh": stats_mh["rmse_mean"],
-    #     "rmse_var_mh": stats_mh["rmse_var"],
-    #     "log_density_mh": stats_mh["log_density"],
-
-    #     "log_density_iid": log_density_iid})
-    # df.to_parquet(source_dir / f"experiments/accuracy/{algorithm}_rmse.parquet")
+        print(f"{algorithm} acceptance rate: {algo.acceptance_probability}")
+        klhr_msjd = np.mean([np.linalg.norm(klhr_draws[m+1] - klhr_draws[m]) for m in range(M-1)])
+        print(f"MSJD: {np.round(klhr_msjd, 2)}")
+        if algorithm == "slice":
+            print(f"#ld evals: {algo.ld_evals}")
+        else:
+            print(f"#ldg evals: {algo.grad_evals}")
 
     plt.clf()
     plt.rc('axes', labelsize = 12)
 
     origin = 10 ** 2
 
-    plt.plot(mdx[origin:], stats_klhr["rmse_mean"][origin:], label="KLHR: mean",
-             linestyle = "dotted", color = "#0072B2", linewidth = 2)
-    plt.plot(mdx[origin:], stats_klhr["rmse_var"][origin:], label="KLHR: var",
-             linestyle = (0, (1, 5)), color = "#D55E00", linewidth = 2)
+    plt.plot(mdx[origin:], stats_klhr["rmse_mean"][origin:],
+             label=f"{'KLHR' if algorithm != 'slice' else 'SLICE'}: mean",
+             linestyle = "dotted",
+             color = "#0072B2",
+             linewidth = 2)
+    plt.plot(mdx[origin:], stats_klhr["rmse_var"][origin:],
+             label=f"{'KLHR' if algorithm != 'slice' else 'SLICE'}: var",
+             linestyle = (0, (1, 5)),
+             color = "#D55E00",
+             linewidth = 2)
 
-    plt.plot(mdx[origin:], stats_mh["rmse_mean"][origin:], label="MH: mean",
-             linestyle = "dashed", color = "#009E73", linewidth = 2)
-    plt.plot(mdx[origin:], stats_mh["rmse_var"][origin:], label="MH: var",
-             linestyle = (0, (5, 5)), color = "#F0E442", linewidth = 2)
+    plt.plot(mdx[origin:], stats_mh["rmse_mean"][origin:],
+             label="MH: mean",
+             linestyle = "dashed",
+             color = "#009E73",
+             linewidth = 2)
+    plt.plot(mdx[origin:], stats_mh["rmse_var"][origin:],
+             label="MH: var",
+             linestyle = (0, (5, 5)),
+             color = "#F0E442",
+             linewidth = 2)
 
     plt.plot([origin, M], [1 / np.sqrt(origin), 1 / np.sqrt(M)],
              linestyle = "solid", color = "black", alpha = 0.2)
@@ -151,17 +136,29 @@ def main(M, warmup, verbose, scale_dir_cov, overrelaxed, eigen_method_one, algor
     plt.xlabel("iteration")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_rmse.png")
+    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_rmse.png")
 
     plt.clf()
     plt.rc('axes', labelsize = 12)
-    plt.hist(stats_klhr["log_density"][origin:], histtype = "step", density = True, label = "KLHR")
-    plt.hist(stats_mh["log_density"][origin:], histtype = "step", density = True, label = "MH")
-    plt.hist(log_density_iid[origin:], histtype = "step", density = True, label = "iid")
+    plt.hist(stats_klhr["log_density"][origin:],
+             histtype = "step",
+             density = True,
+             label = f"{'KLHR' if algorithm != 'slice' else 'SLICE'}")
+
+    plt.hist(stats_mh["log_density"][origin:],
+             histtype = "step",
+             density = True,
+             label = "MH")
+
+    plt.hist(log_density_iid[origin:],
+             histtype = "step",
+             density = True,
+             label = "IID")
+
     plt.xlabel("log_density")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_{scale_dir_cov}_{overrelaxed}_{eigen_method_one}_histogram_log_density.png")
+    plt.savefig(source_dir / f"experiments/accuracy/{algorithm}_{warmup}_histogram_log_density.png")
     plt.close()
 
 if __name__ == "__main__":
