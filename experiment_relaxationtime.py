@@ -1,23 +1,41 @@
+from pathlib import Path
+import time
+
 import click
 import matplotlib.pyplot as plt
 import numpy as np
-from pathlib import Path
-import sys
 
 import bridgestan as bs
 from bsmodel import BSModel
+import db
 from klhr_sinh import KLHRSINH
 from klhr import KLHR
 from klhr_sub_sinh import KLHRSUBSINH
 from slice import Slice
 
 @click.command()
-@click.option("-M", "--iterations", "M", type=int, default=2_000, help="number of iterations, including warmup")
-@click.option("-w", "--warmup", "warmup", type=int, default=1_000, help="number of warmup iterations")
-@click.option("-r", "--replication", "rep", type=int, default=0, help="replication number for naming output files")
-@click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
+@click.option("-M", "--iterations", "M",
+              type=int, default=2_000,
+              help="number of iterations, including warmup")
+@click.option("-w", "--warmup", "warmup",
+              type=int, default=1_000,
+              help="number of warmup iterations")
+@click.option("-r", "--replications", "reps",
+              type=int, default=1,
+              help="replication number for naming output files")
+@click.option("-s", "--seed", "seed",
+              type=int, default=204,
+              help="seed to initialize the replications")
+@click.option("-f", "--fresh", "start_fresh",
+              is_flag=True,
+              help="erase database before experiments")
+@click.option("-t", "--tolerance", "tolerance",
+              type = float, default=1e-3)
 @click.argument("algorithm", type=str)
-def main(M, warmup, rep, verbose, algorithm):
+def main(M, warmup, reps, seed, start_fresh, tolerance, algorithm):
+    dbpath = "experiments.db"
+    db.init_relaxationtime(dbpath, start_fresh)
+
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
     model = "earnings"
@@ -25,49 +43,61 @@ def main(M, warmup, rep, verbose, algorithm):
     bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
                        data_file = source_dir / f"stan/{model}.json")
 
-    if algorithm == "klhr":
-        algo = KLHR(bs_model, warmup = warmup)
-    elif algorithm == "klhr_sinh":
-        algo = KLHRSINH(bs_model, warmup = warmup)
-    elif algorithm == "klhr_sub_sinh":
-        algo = KLHRSUBSINH(bs_model, warmup = warmup)
-    elif algorithm == "slice":
-        algo = Slice(bs_model, warmup = warmup)
-    else:
-        print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr, klhr_sinh, klhr_sub_sinh, or slice")
-        sys.exit(0)
+    algorithms = {
+        "klhr": KLHR,
+        "klhr_sinh": KLHRSINH,
+        "klhr_sub_sinh": KLHRSUBSINH,
+        "slice": Slice
+    }
 
-    draws = algo.sample(M)
-    idx = np.arange(M)
+    for rep in range(reps):
+        seedi = np.random.SeedSequence([seed, rep])
+        algo = algorithms[algorithm](bs_model,
+                                     warmup = warmup,
+                                     seed = seedi,
+                                     gtol = tolerance)
+        start = time.perf_counter()
+        draws = algo.sample(M)
+        runtime = time.perf_counter() - start
+        idx = np.arange(M)
 
-    fig, axs = plt.subplots(2, 2, figsize = (14, 6))
-    axs[0, 0].plot(idx, draws[:, 0])
-    axs[0, 0].set_ylabel(r"$\beta_0$")
+        fig, axs = plt.subplots(2, 2, figsize = (14, 6))
+        axs[0, 0].plot(idx, draws[:, 0])
+        axs[0, 0].set_ylabel(r"$\beta_0$")
 
-    axs[0, 1].plot(idx, draws[:, 1])
-    axs[0, 1].set_ylabel(r"$\beta_1$")
+        axs[0, 1].plot(idx, draws[:, 1])
+        axs[0, 1].set_ylabel(r"$\beta_1$")
 
-    axs[1, 0].plot(idx, draws[:, 2])
-    axs[1, 0].set_ylabel(r"$\sigma$")
+        axs[1, 0].plot(idx, draws[:, 2])
+        axs[1, 0].set_ylabel(r"$\sigma$")
 
-    axs[1, 1].plot(idx, draws[:, 3])
-    axs[1, 1].set_ylabel(r"$s$")
+        axs[1, 1].plot(idx, draws[:, 3])
+        axs[1, 1].set_ylabel(r"$s$")
 
-    plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{rep:0>2}.png")
-    plt.close()
+        plt.tight_layout()
+        plt.savefig(source_dir / f"experiments/relaxationtime/{algorithm}_{rep:0>2}.png")
+        plt.close()
 
-    if verbose:
-        print(f"Acceptance rate: {np.round(algo.acceptance_probability, 2)}")
-        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) for m in range(M-1)])
-        print(f"MSJD: {np.round(msjd, 2)}")
-        print(np.mean(draws[warmup:, :], axis = 0))
-        print(np.std(draws[warmup:, :], axis = 0))
-        if algorithm == "slice":
-            print(f"#ld evals: {algo.ld_evals}")
-        else:
-            print(f"#ldg evals: {algo.grad_evals}")
+        msjd = 0.0
+        for m in range(M-1):
+            d = np.linalg.norm(draws[m+1] - draws[m]) - msjd
+            msjd += d / (m + 1)
+        ldevals = algo.ld_evals if algorithm == "slice" else algo.grad_evals
+        d = {
+            "algorithm": algorithm,
+            "replication": rep,
+            "msjd": msjd,
+            "acceptance_rate": algo.acceptance_probability,
+            "ld_evals": ldevals,
+            "runtime": runtime,
+        }
+
+        m = np.mean(draws[warmup:, :], axis = 0)
+        v = np.var(draws[warmup:, :], ddof = 1, axis = 0)
+        varnames = ["b0", "b1", "sigma", "s"]
+        d |= {"m" + varnames[i]: mi for i, mi in enumerate(m)}
+        d |= {"v" + varnames[i]: vi for i, vi in enumerate(v)}
+        db.append_df(dbpath, "relaxationtime", d)
 
 if __name__ == "__main__":
     main()

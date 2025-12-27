@@ -220,3 +220,6 @@ stan/*
 .DS_Store
 .juliahistory
 experiments.txt
+.python-version
+experiments.db
+experiments/run_stan.py

@@ -1,15 +1,14 @@
 from pathlib import Path
-import sys
+import time
 
 import click
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import scipy.stats as st
-
 
 import bridgestan as bs
 from bsmodel import BSModel
+import db
 from klhr import KLHR
 from klhr_sinh import KLHRSINH
 from klhr_sub_sinh import KLHRSUBSINH
@@ -17,11 +16,22 @@ from slice import Slice
 from onlinemoments import OnlineMoments
 
 @click.command()
-@click.option("-M", "--iterations", "M", type=int, default=1_000, help="number of iterations")
-@click.option("-w", "--warmup", "warmup", type=int, default=0, help="number of warmup iterations")
-@click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
+@click.option("-M", "--iterations", "M",
+              type=int, default=1_000,
+              help="number of iterations")
+@click.option("-w", "--warmup", "warmup",
+              type=int, default=0,
+              help="number of warmup iterations")
+@click.option("-s", "--seed", "seed",
+              type=int, default=530,
+              help="seed to initialize the replications")
+@click.option("-f", "--fresh", "start_fresh",
+              is_flag=True,
+              help="erase database before experiments")
 @click.argument("algorithm", type=str)
-def main(M, warmup, verbose, algorithm):
+def main(M, warmup, seed, start_fresh, algorithm):
+    dbpath = "experiments.db"
+    db.init_funnel(dbpath, start_fresh)
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
@@ -30,30 +40,20 @@ def main(M, warmup, verbose, algorithm):
     bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
                        data_file = source_dir / f"stan/{model}.json")
 
-    if algorithm == "klhr":
-        algo = KLHR(bs_model, warmup = warmup)
-    elif algorithm == "klhr_sinh":
-        algo = KLHRSINH(bs_model, warmup = warmup)
-    elif algorithm == "klhr_sub_sinh":
-        algo = KLHRSUBSINH(bs_model, warmup = warmup)
-    elif algorithm == "slice":
-        algo = Slice(bs_model, warmup = warmup)
-    else:
-        print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr, klhr_sinh, klhr_sub_sinh, or slice")
-        sys.exit(0)
+    algorithms = {
+        "klhr": KLHR,
+        "klhr_sinh": KLHRSINH,
+        "klhr_sub_sinh": KLHRSUBSINH,
+        "slice": Slice
+    }
+    algo = algorithms[algorithm](bs_model,
+                                 warmup = warmup,
+                                 seed = seed)
 
-    mdx = np.arange(M)
+    start = time.perf_counter()
     draws = algo.sample(M)
-
-    if verbose:
-        print(f"Acceptance rate: {algo.acceptance_probability}")
-        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) for m in range(M-1)])
-        print(f"MSJD: {np.round(msjd, 2)}")
-        if algorithm == "slice":
-            print(f"#ld evals: {algo.ld_evals}")
-        else:
-            print(f"#ldg evals: {algo.grad_evals}")
+    runtime = time.perf_counter() - start
+    mdx = np.arange(M)
 
     plt.clf()
     plt.scatter(draws[warmup:, 1], draws[warmup:, 0],
@@ -70,6 +70,20 @@ def main(M, warmup, verbose, algorithm):
     plt.tight_layout()
     plt.savefig(source_dir / f"experiments/funnel/histogram_{algorithm}.png")
     plt.close()
+
+    msjd = 0.0
+    for m in range(M-1):
+        d = np.linalg.norm(draws[m+1] - draws[m]) - msjd
+        msjd += d / (m + 1)
+    ldevals = algo.ld_evals if algorithm == "slice" else algo.grad_evals
+    d = {
+        "algorithm": algorithm,
+        "msjd": msjd,
+        "acceptance_rate": algo.acceptance_probability,
+        "ld_evals": ldevals,
+        "runtime": runtime,
+    }
+    db.append_df(dbpath, "funnel", d)
 
 if __name__ == "__main__":
     main()

@@ -1,80 +1,119 @@
+import json
+from pathlib import Path
+import time
+
 import click
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-from pathlib import Path
 import scipy.stats as st
 
 import bridgestan as bs
 from bsmodel import BSModel
+import db
 from klhr import KLHR
+from klhr_reflection import KLHRReflection
 from klhr_sinh import KLHRSINH
 from klhr_sub_sinh import KLHRSUBSINH
 from slice import Slice
 from onlinemoments import OnlineMoments
 
 @click.command()
-@click.option("-M", "--iterations", "M", type=int, default=1_000, help="number of iterations")
-@click.option("-w", "--warmup", "warmup", type=int, default=0, help="number of warmup iterations")
-@click.option("-r", "--replication", "rep", type=int, default=1, help="replication number for naming output files")
-@click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
+@click.option("-M", "--iterations", "M",
+              type=int, default=1_000, help="number of iterations")
+@click.option("-w", "--warmup", "warmup",
+              type=int, default=0, help="number of warmup iterations")
+@click.option("-r", "--replications", "reps",
+              type=int, default=1,
+              help="replication number for naming output files")
+@click.option("-s", "--seed", "seed",
+              type=int, default=886,
+              help="seed to initialize the replications")
+@click.option("-f", "--fresh", "start_fresh",
+              is_flag=True,
+              help="erase database before experiments")
 @click.argument("algorithm", type=str)
-def main(M, warmup, rep, verbose, algorithm):
-
+def main(M, warmup, reps, seed, start_fresh, algorithm):
+    dbpath = "experiments.db"
+    db.init_ar1(dbpath, start_fresh)
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
     model = "ar1"
     source_dir = Path(__file__).resolve().parent
-    bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
-                       data_file = source_dir / f"stan/{model}.json")
+    stan_model = source_dir / f"stan/{model}.stan"
+    stan_data = source_dir / f"stan/{model}.json"
 
-    if algorithm == "klhr":
-        algo = KLHR(bs_model, warmup = warmup)
-    elif algorithm == "klhr_sinh":
-        algo = KLHRSINH(bs_model, warmup = warmup)
-    elif algorithm == "klhr_sub_sinh":
-        algo = KLHRSUBSINH(bs_model, warmup = warmup)
-    elif algorithm == "slice":
-        algo = Slice(bs_model, warmup = warmup)
-    else:
-        print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr, klhr_sinh, klhr_sub_sinh, or slice")
-        sys.exit(0)
+    algorithms = {
+        "klhr": KLHR,
+        "klhr_sinh": KLHRSINH,
+        "klhr_sub_sinh": KLHRSUBSINH,
+        "slice": Slice,
+        "klhr_reflection": KLHRReflection,
+    }
 
-    mdx = np.arange(M)
-    draws = algo.sample(M)
+    alphas = 0.1 * np.array([9]) # np.arange(10)
+    acceptance_rates = np.zeros_like(alphas)
+    for adx, alpha in enumerate(alphas):
+        with open(stan_data, "r") as f:
+            data = json.load(f)
+        data["alpha"] = alpha
+        with open(stan_data, "w") as f:
+            json.dump(data, f)
 
-    if verbose:
-        print(f"Acceptance rate: {algo.acceptance_probability}")
-        msjd = np.mean([np.linalg.norm(draws[m+1] - draws[m]) for m in range(M-1)])
-        print(f"MSJD: {np.round(msjd, 2)}")
-        if algorithm == "slice":
-            print(f"#ld evals: {algo.ld_evals}")
-        else:
-            print(f"#ldg evals: {algo.grad_evals}")
+        bs_model = BSModel(stan_file = stan_model,
+                           data_file = stan_data)
 
-    v = np.var(draws[warmup:, :], ddof = 1, axis = 0)
-    rmse_var = np.sqrt(np.mean( (v - 1) ** 2))
-    m = np.mean(draws[warmup:, :], axis = 0)
-    rmse_mean = np.sqrt(np.mean( m ** 2))
-    if verbose:
-        print(f"maximum absolute mean: {np.max(np.abs(m)):.4f}")
-        print(f"RMSE(mean): {rmse_mean:.4f}")
-        print(f"means: {m}")
-        print(f"minimum variance: {np.min(v):.4f}")
-        print(f"RMSE(var): {rmse_var:.4f}")
-        print(f"vars: {v}")
+        seedi = np.random.SeedSequence([seed, adx])
+        algo = algorithms[algorithm](bs_model,
+                                     warmup = warmup,
+                                     seed = seedi)
+        start = time.perf_counter()
+        draws = algo.sample(M)
+        runtime = time.perf_counter() - start
+
+        msjd = 0.0
+        for m in range(M-1):
+            d = np.linalg.norm(draws[m+1] - draws[m])
+            msjd += d / (m + 1)
+        ldevals = algo.ld_evals if algorithm == "slice" else algo.grad_evals
+        d = {
+            "algorithm": algorithm,
+            "alpha": alpha,
+            "msjd": msjd,
+            "acceptance_rate": algo.acceptance_probability,
+            "ld_evals": ldevals,
+            "runtime": runtime,
+        }
+        acceptance_rates[adx] = algo.acceptance_probability
+
+        m = np.mean(draws[warmup:, :], axis = 0)
+        v = np.var(draws[warmup:, :], ddof = 1, axis = 0)
+        d |= {
+            "m1": m[0],
+            "v1": v[0],
+            "max_dist_mean": np.max(np.abs(m)),
+            "max_dist_var": np.max(np.abs(v - 1)),
+            "prop_mean_g0": np.mean(m > 0),
+            "prop_var_g1": np.mean(v > 1),
+        }
+        db.append_df(dbpath, "ar1", d)
+
+        plt.clf()
+        for d in range(algo.D):
+            plt.hist(draws[warmup:, d], histtype = "step",
+                     density = True, color = "#0072B2", alpha = 0.1)
+            x = np.linspace(-4, 4, 301)
+            fx = st.norm().pdf(x)
+            plt.plot(x, fx, linestyle = "dashed", color = "#D55E00")
+            plt.tight_layout()
+            plt.savefig(source_dir / f"experiments/ar1/{algorithm}_{np.round(alpha, 2)}.png")
 
     plt.clf()
-    for d in range(algo.D):
-        plt.hist(draws[warmup:, d], histtype = "step",
-                 density = True, color = "#0072B2", alpha = 0.1)
-    x = np.linspace(-4, 4, 301)
-    fx = st.norm().pdf(x)
-    plt.plot(x, fx, linestyle = "dashed", color = "#D55E00")
-    plt.title(f"RMSE(mean) = {rmse_mean:.4f}, RMSE(var) = {rmse_var:.4f}")
+    plt.scatter(alphas, acceptance_rates, color = "#0072B2")
+    plt.xlabel("alpha")
+    plt.ylabel("acceptance probability")
+    plt.ylim(0, None)
     plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/ar1/{algorithm}_{rep:0>2}.png")
+    plt.savefig(source_dir / f"experiments/ar1/acceptance_probabilities.png")
     plt.close()
 
 if __name__ == "__main__":

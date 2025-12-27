@@ -23,6 +23,7 @@ class MH(mcmc.MCMCBase):
 
             r = self.log_density(thetap)
             r -= self.log_density(self.theta)
+            self._ld_evals += 2
             # r += self.proposal_density(self.theta, thetap)
             # r -= self.proposal_density(thetap, self.theta)
 

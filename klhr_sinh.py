@@ -14,10 +14,10 @@ class KLHRSINH(MCMCBase):
     def __init__(self, bsmodel,
                  theta = None,
                  seed = None,
-                 N = 8,
-                 K = 10,
+                 N = 6,
+                 K = 16,
                  J = 2,
-                 l = 4,
+                 l = 0,
                  initscale = 0.1,
                  warmup = 1_000,
                  windowsize = 50,
@@ -25,7 +25,8 @@ class KLHRSINH(MCMCBase):
                  tol = 1e-10,
                  grad_clip = 1e15,
                  scale_clip = 300,
-                 max_init_tries = 100):
+                 gtol = 1e-3,
+                 **kwargs):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -35,7 +36,7 @@ class KLHRSINH(MCMCBase):
         self._tol = tol
         self._grad_clip = grad_clip
         self._scale_clip = scale_clip
-        self._max_init_tries = max_init_tries
+        self._gtol = gtol
 
         self.x, self.w = hermgauss(self.N)
         # normalize roots and weights
@@ -58,8 +59,6 @@ class KLHRSINH(MCMCBase):
         self.acceptance_probability = 0
         self.grad_evals = 0
 
-        self._initialize()
-
     def _unpack(self, eta):
         m = eta[0]
         c = self._scale_clip
@@ -67,20 +66,6 @@ class KLHRSINH(MCMCBase):
         d = np.exp(np.clip(eta[2], -c, c)) + self._tol
         e = eta[3]
         return m, s, d, e
-
-    def _initialize(self):
-        tries = 0
-        while True:
-            tries += 1
-            init = self.rng.normal(size = self.D) * self._initscale
-            l, g = self.model.log_density_gradient(init)
-            if np.isfinite(l) and np.isfinite(np.linalg.norm(g)):
-                self.theta = init
-                break
-
-            if tries >= self._max_init_tries:
-                print("failed to initialize")
-                sys.exit(1)
 
     def _cosh(self, x):
         c = self._scale_clip
@@ -171,9 +156,11 @@ class KLHRSINH(MCMCBase):
                       jac = True,
                       method = "BFGS")
          self.grad_evals += o["nfev"]
-         s = o["hess_inv"][0,0]
-         s = (s > 0) * 0.5 * np.log(s)
-         init = self.rng.normal(size = 4) * self._initscale
+         h = o["hess_inv"][0,0]
+         s = 0.0
+         if h > 0 and np.isfinite(h):
+            s = 0.5 * np.log(h)
+         init = np.zeros(4)
          init[0] = o.x[0]
          init[1] = s
          o = minimize(self.KL,
@@ -181,7 +168,7 @@ class KLHRSINH(MCMCBase):
                       args = (rho,),
                       jac = True,
                       method = "BFGS",
-                      options = {"gtol": 1e-3})
+                      options = {"gtol": self._gtol})
          self.grad_evals += o["nfev"] * self.N
          return o.x
 
@@ -228,10 +215,9 @@ class KLHRSINH(MCMCBase):
         r = self.model.log_density(thetap)
         r -= self.model.log_density(self.theta)
         r += self._log_q(0, eta)
-        r -= self._log_q(zp, eta)
+        r -= self._log_q(zp[0], eta)
 
         a = np.log(self.rng.uniform()) < np.minimum(0, r)
-        self._prev_theta = self.theta
         self.theta = a * thetap + (1 - a) * self.theta
 
         d = a - self.acceptance_probability
@@ -264,8 +250,6 @@ if __name__ == "__main__":
 
     import bridgestan as bs
     from bsmodel import BSModel
-    from klhr_sinh import KLHRSINH
-    from klhr import KLHR
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
@@ -314,4 +298,6 @@ if __name__ == "__main__":
     approx_grad = jacobian(h, x)
     grad = algo.KL(x, rho)[1]
     # assert np.all(approx_grad.success)
+    print(grad)
+    print(approx_grad.df)
     assert np.allclose(grad, approx_grad.df)

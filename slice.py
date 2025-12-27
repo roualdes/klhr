@@ -26,7 +26,7 @@ class Slice(MCMCBase):
                  windowsize = 50,
                  windowscale = 2,
                  tol = 1e-10,
-                 max_init_tries = 100):
+                 **kwargs):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.w = w
@@ -53,22 +53,6 @@ class Slice(MCMCBase):
         self._draw = 0
         self.acceptance_probability = 0
         self.ld_evals = 0
-
-        self._initialize()
-
-    def _initialize(self):
-        tries = 0
-        while True:
-            tries += 1
-            init = self.rng.normal(size = self.D) * self._initscale
-            l = self.model.log_density(init)
-            if np.isfinite(l):
-                self.theta = init
-                break
-
-            if tries >= self._max_init_tries:
-                print("failed to initialize")
-                sys.exit(1)
 
     def _uni_slice(self, rho):
         def logp_rho(x):

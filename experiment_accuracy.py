@@ -1,11 +1,13 @@
+from pathlib import Path
+import time
+
 import click
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-from pathlib import Path
 
 import bridgestan as bs
 from bsmodel import BSModel
+import db
 from klhr import KLHR
 from klhr_sinh import KLHRSINH
 from klhr_sub_sinh import KLHRSUBSINH
@@ -14,12 +16,22 @@ from mh import MH
 from onlinemoments import OnlineMoments
 
 @click.command()
-@click.option("-M", "--iterations", "M", type=int, default=1_000, help="number of iterations")
-@click.option("-w", "--warmup", "warmup", type=int, default=0, help="set value from which RMSEs are plot")
-@click.option("-v", "--verbose", "verbose", is_flag=True, help="print information during run")
+@click.option("-M", "--iterations", "M",
+              type=int, default=1_000,
+              help="number of iterations")
+@click.option("-w", "--warmup", "warmup",
+              type=int, default=0,
+              help="set value from which RMSEs are plot")
+@click.option("-s", "--seed", "seed",
+              type=int, default=123,
+              help="seed to initialize the replications")
+@click.option("-f", "--fresh", "start_fresh",
+              is_flag=True,
+              help="erase database before experiments")
 @click.argument("algorithm", type=str)
-def main(M, warmup, verbose, algorithm):
-
+def main(M, warmup, seed, start_fresh, algorithm):
+    dbpath = "experiments.db"
+    db.init_accuracy(dbpath, start_fresh)
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
     model = "normal"
@@ -27,25 +39,56 @@ def main(M, warmup, verbose, algorithm):
     bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
                        data_file = source_dir / f"stan/{model}.json")
 
-    if algorithm == "klhr":
+    algorithms = {
+        "klhr": KLHR,
+        "klhr_sinh": KLHRSINH,
+        "klhr_sub_sinh": KLHRSUBSINH,
+        "slice": Slice
+    }
+    algo = algorithms[algorithm](bs_model,
+                                 warmup = warmup,
+                                 seed = seed)
 
-        algo = KLHR(bs_model, warmup = warmup)
+    start = time.perf_counter()
+    klhr_draws = algo.sample(M)
+    runtime = time.perf_counter() - start
+    mdx = np.arange(M)
 
-
-    elif algorithm == "klhr_sinh":
-        algo = KLHRSINH(bs_model, warmup = warmup)
-    elif algorithm == "klhr_sub_sinh":
-        algo = KLHRSUBSINH(bs_model, warmup = warmup)
-    elif algorithm == "slice":
-        algo = Slice(bs_model, warmup = warmup)
-    else:
-        print(f"Unknown algorithm {algorithm}")
-        print("Available algorithms: klhr, klhr_sinh, klhr_sub_sinh, or slice")
-        sys.exit(0)
+    msjd = 0.0
+    for m in range(M-1):
+        d = np.linalg.norm(klhr_draws[m+1] - klhr_draws[m]) - msjd
+        msjd += d / (m + 1)
+    ldevals = algo.ld_evals if algorithm == "slice" else algo.grad_evals
+    d = {
+        "algorithm": algorithm,
+        "msjd": msjd,
+        "acceptance_rate": algo.acceptance_probability,
+        "ld_evals": ldevals,
+        "runtime": runtime,
+    }
+    db.append_df(dbpath, "funnel", d)
 
     # when D = 2 => stepsize = 2.4
     # when D = 100 => stepsize = 0.24
-    mh = MH(bs_model, 0.24)
+    stepsize = 2.4 if algo.D == 2 else 0.24
+    mh = MH(bs_model, stepsize)
+    start = time.perf_counter()
+    mh_draws = mh.sample(M)
+    runtime = time.perf_counter() - start
+
+    msjd = 0.0
+    for m in range(M-1):
+        d = np.linalg.norm(mh_draws[m+1] - mh_draws[m]) - msjd
+        msjd += d / (m + 1)
+    ldevals = mh._ld_evals
+    d = {
+        "algorithm": "mh",
+        "msjd": msjd,
+        "acceptance_rate": mh.acceptance_probability,
+        "ld_evals": mh._ld_evals,
+        "runtime": runtime,
+    }
+    db.append_df(dbpath, "funnel", d)
 
     stats_klhr = {
         "om": OnlineMoments(algo.D),
@@ -66,10 +109,6 @@ def main(M, warmup, verbose, algorithm):
     Sigma = np.eye(algo.D)
     log_density_iid = np.zeros(M)
 
-    mdx = np.arange(M)
-    klhr_draws = algo.sample(M)
-    mh_draws = mh.sample(M)
-
     for m in mdx:
         theta = klhr_draws[m]
         stats_klhr["om"].update(theta)
@@ -86,19 +125,6 @@ def main(M, warmup, verbose, algorithm):
         x = rng.multivariate_normal(mu, Sigma)
         log_density_iid[m] = bs_model.log_density(x)
 
-    if verbose:
-        print(f"MH acceptance probability: {mh.acceptance_probability}")
-        mh_msjd = np.mean([np.linalg.norm(mh_draws[m+1] - mh_draws[m]) for m in range(M-1)])
-        print(f"MSJD: {np.round(mh_msjd, 2)}")
-        print(f"#ld evals: {mh._ld_evals}")
-
-        print(f"{algorithm} acceptance rate: {algo.acceptance_probability}")
-        klhr_msjd = np.mean([np.linalg.norm(klhr_draws[m+1] - klhr_draws[m]) for m in range(M-1)])
-        print(f"MSJD: {np.round(klhr_msjd, 2)}")
-        if algorithm == "slice":
-            print(f"#ld evals: {algo.ld_evals}")
-        else:
-            print(f"#ldg evals: {algo.grad_evals}")
 
     plt.clf()
     plt.rc('axes', labelsize = 12)

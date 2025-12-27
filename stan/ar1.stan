@@ -1,8 +1,8 @@
 data {
   int<lower=1> N;
+  real alpha;
 }
 transformed data {
-  real alpha = 0.9;
   real beta = sqrt(1 - alpha * alpha);
 }
 parameters {

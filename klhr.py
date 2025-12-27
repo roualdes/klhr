@@ -1,5 +1,3 @@
-import sys
-
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from scipy.optimize import minimize
@@ -16,10 +14,10 @@ class KLHR(MCMCBase):
                  bsmodel,
                  theta = None,
                  seed = None,
-                 N = 8,
-                 K = 10,
+                 N = 6,
+                 K = 16,
                  J = 2,
-                 l = 4,
+                 l = 0,
                  initscale = 0.1,
                  warmup = 1_000,
                  windowsize = 50,
@@ -27,7 +25,8 @@ class KLHR(MCMCBase):
                  tol = 1e-10,
                  grad_clip = 1e15,
                  scale_clip = 300,
-                 max_init_tries = 100):
+                 gtol = 1e-3,
+                 **kwargs):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
         self.N = N
@@ -37,7 +36,7 @@ class KLHR(MCMCBase):
         self._tol = tol
         self._grad_clip = grad_clip
         self._scale_clip = scale_clip
-        self._max_init_tries = max_init_tries
+        self._gtol = gtol
 
         self.x, self.w = hermgauss(self.N)
         # normalize roots and weights
@@ -60,27 +59,11 @@ class KLHR(MCMCBase):
         self.acceptance_probability = 0
         self.grad_evals = 0
 
-        self._initialize()
-
     def _unpack(self, eta):
         m = eta[0]
         c = self._scale_clip
         s = np.exp(np.clip(eta[1], -c, c)) + self._tol
         return m, s
-
-    def _initialize(self):
-        tries = 0
-        while True:
-            tries += 1
-            init = self.rng.normal(size = self.D) * self._initscale
-            l, g = self.model.log_density_gradient(init)
-            if np.isfinite(l) and np.isfinite(np.linalg.norm(g)):
-                self.theta = init
-                break
-
-            if tries >= self._max_init_tries:
-                print("failed to initialize")
-                sys.exit(1)
 
     def _logp_grad(self, x):
         l, g = self.model.log_density_gradient(x)
@@ -94,7 +77,7 @@ class KLHR(MCMCBase):
         for xn, wn in zip(self.x, self.w):
             y = s * xn + m
             xi = y * rho + self.theta
-            logp, grad_logp = self.model.log_density_gradient(xi)
+            logp, grad_logp = self._logp_grad(xi)
             out += wn * logp
             w_grad_rho = wn * grad_logp.dot(rho)
             grad[0] += w_grad_rho
@@ -114,14 +97,17 @@ class KLHR(MCMCBase):
                      jac = True,
                      method = "BFGS")
         self.grad_evals += o["nfev"]
-        s = o["hess_inv"][0, 0]
-        init = np.array([o.x[0], (s > 0) * 0.5 * np.log(s)])
+        h = o["hess_inv"][0, 0]
+        s = 0.0
+        if h > 0 and np.isfinite(h):
+            s = 0.5 * np.log(h)
+        init = np.array([o.x[0], s])
         o = minimize(self.KL,
                      init,
                      args = (rho,),
                      jac = True,
                      method = "BFGS",
-                     options = {"gtol": 1e-3})
+                     options = {"gtol": self._gtol})
         self.grad_evals += o["nfev"] * self.N
         return o.x
 
@@ -134,7 +120,7 @@ class KLHR(MCMCBase):
         rho = self.rng.multivariate_normal(m, S)
         return rho / np.linalg.norm(rho + self._tol)
 
-    def _logq(self, x, eta):
+    def _log_q(self, x, eta):
         m, s = self._unpack(eta)
         z = (x - m) / s
         return -np.log(s) - 0.5 * z * z
@@ -143,29 +129,31 @@ class KLHR(MCMCBase):
         m, s = self._unpack(eta)
         K = self.K
         Normal = st.norm(m, s)
-        u = Normal.cdf(np.array([0]))
+        u = Normal.cdf(np.zeros(1))
         r = st.binom(K, u).rvs()
-        up = u
+        up = 0
         if r > K - r:
             v = st.beta(K - r + 1, 2 * r - K).rvs()
             up = u * v
         elif r < K - r:
             v = st.beta(r + 1, K - 2 * r).rvs()
             up = 1 - (1 - u) * v
+        elif r == K - r:
+            up = u
         return Normal.ppf(up)
 
     def _metropolis_step(self, eta, rho):
-        m, s = self._unpack(eta)
-        zp = self._overrelaxed_proposal(eta)
-        thetap = zp * rho + self.theta
+        xi = self._overrelaxed_proposal(eta)
+        thetap = xi * rho + self.theta
 
         r = self.model.log_density(thetap)
         r -= self.model.log_density(self.theta)
-        r += self._logq(0, eta)
-        r -= self._logq(zp, eta)
+        r += self._log_q(0, eta)
+        r -= self._log_q(xi[0], eta)
+
+        self.grad_evals += 2
 
         a = np.log(self.rng.uniform()) < np.minimum(0, r)
-        self._prev_theta = self.theta
         self.theta = a * thetap + (1 - a) * self.theta
 
         d = a - self.acceptance_probability
