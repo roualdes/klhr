@@ -48,9 +48,12 @@ def make_plot(draws, algorithm, rep, source_dir):
               help="seed to initialize the replications")
 @click.option("-f", "--fresh", "start_fresh", is_flag=True,
               help="erase database before experiments")
-@click.option("-t", "--tolerance", "tolerance", type = float, default=1e-3)
+@click.option("-t", "--tolerance", "tolerance",
+              type = float, default=1e-3)
 @click.argument("algorithm", type=str)
 def main(M, warmup, reps, seed, start_fresh, tolerance, algorithm):
+    dbpath = "experiments.db"
+    db.init_relaxationtime(dbpath, start_fresh)
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
     model = "earnings"
@@ -77,8 +80,7 @@ def main(M, warmup, reps, seed, start_fresh, tolerance, algorithm):
         seedi = np.random.SeedSequence([seed, rep])
         algo = algorithms[algorithm](bs_model,
                                      warmup = warmup,
-                                     seed = seedi,
-                                     gtol = tolerance)
+                                     seed = seedi)
         start = time.perf_counter()
         draws = algo.sample(M)
         runtime = time.perf_counter() - start

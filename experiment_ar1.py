@@ -50,71 +50,64 @@ def main(M, warmup, reps, seed, start_fresh, algorithm):
         "klhr_reflection": KLHRReflection,
     }
 
-    alphas = 0.1 * np.array([9]) # np.arange(10)
-    acceptance_rates = np.zeros_like(alphas)
-    for adx, alpha in enumerate(alphas):
-        with open(stan_data, "r") as f:
-            data = json.load(f)
-        data["alpha"] = alpha
-        with open(stan_data, "w") as f:
-            json.dump(data, f)
+    for rep in range(reps):
+        alphas = 0.1 * np.array([9]) # np.arange(10)
+        acceptance_rates = np.zeros_like(alphas)
+        for adx, alpha in enumerate(alphas):
+            with open(stan_data, "r") as f:
+                data = json.load(f)
+            data["alpha"] = alpha
+            with open(stan_data, "w") as f:
+                json.dump(data, f)
 
-        bs_model = BSModel(stan_file = stan_model,
-                           data_file = stan_data)
+            bs_model = BSModel(stan_file = stan_model,
+                               data_file = stan_data)
 
-        seedi = np.random.SeedSequence([seed, adx])
-        algo = algorithms[algorithm](bs_model,
-                                     warmup = warmup,
-                                     seed = seedi)
-        start = time.perf_counter()
-        draws = algo.sample(M)
-        runtime = time.perf_counter() - start
+            seedi = np.random.SeedSequence([seed, rep])
+            algo = algorithms[algorithm](bs_model,
+                                         warmup = warmup,
+                                         seed = seedi)
+            start = time.perf_counter()
+            draws = algo.sample(M)
+            runtime = time.perf_counter() - start
 
-        msjd = 0.0
-        for m in range(M-1):
-            d = np.linalg.norm(draws[m+1] - draws[m])
-            msjd += d / (m + 1)
-        ldevals = algo.ld_evals if algorithm == "slice" else algo.grad_evals
-        d = {
-            "algorithm": algorithm,
-            "alpha": alpha,
-            "msjd": msjd,
-            "acceptance_rate": algo.acceptance_probability,
-            "ld_evals": ldevals,
-            "runtime": runtime,
-        }
-        acceptance_rates[adx] = algo.acceptance_probability
+            msjd = 0.0
+            for m in range(M-1):
+                d = np.linalg.norm(draws[m+1] - draws[m])
+                msjd += d / (m + 1)
+            ldevals = algo.ld_evals if algorithm == "slice" else algo.grad_evals
+            d = {
+                "algorithm": algorithm,
+                "alpha": alpha,
+                "msjd": msjd,
+                "replication": rep,
+                "acceptance_rate": algo.acceptance_probability,
+                "ld_evals": ldevals,
+                "runtime": runtime,
+            }
+            acceptance_rates[adx] = algo.acceptance_probability
 
-        m = np.mean(draws[warmup:, :], axis = 0)
-        v = np.var(draws[warmup:, :], ddof = 1, axis = 0)
-        d |= {
-            "m1": m[0],
-            "v1": v[0],
-            "max_dist_mean": np.max(np.abs(m)),
-            "max_dist_var": np.max(np.abs(v - 1)),
-            "prop_mean_g0": np.mean(m > 0),
-            "prop_var_g1": np.mean(v > 1),
-        }
-        db.append_df(dbpath, "ar1", d)
+            m = np.mean(draws[warmup:, :], axis = 0)
+            v = np.var(draws[warmup:, :], ddof = 1, axis = 0)
+            d |= {
+                "m1": m[0],
+                "v1": v[0],
+                "max_dist_mean": np.max(np.abs(m)),
+                "max_dist_var": np.max(np.abs(v - 1)),
+                "prop_mean_g0": np.mean(m > 0),
+                "prop_var_g1": np.mean(v > 1),
+            }
+            db.append_df(dbpath, "ar1", d)
 
-        plt.clf()
-        for d in range(algo.D):
-            plt.hist(draws[warmup:, d], histtype = "step",
-                     density = True, color = "#0072B2", alpha = 0.1)
-            x = np.linspace(-4, 4, 301)
-            fx = st.norm().pdf(x)
-            plt.plot(x, fx, linestyle = "dashed", color = "#D55E00")
-            plt.tight_layout()
-            plt.savefig(source_dir / f"experiments/ar1/{algorithm}_{np.round(alpha, 2)}.png")
-
-    plt.clf()
-    plt.scatter(alphas, acceptance_rates, color = "#0072B2")
-    plt.xlabel("alpha")
-    plt.ylabel("acceptance probability")
-    plt.ylim(0, None)
-    plt.tight_layout()
-    plt.savefig(source_dir / f"experiments/ar1/acceptance_probabilities.png")
-    plt.close()
+            plt.clf()
+            for d in range(algo.D):
+                plt.hist(draws[warmup:, d], histtype = "step",
+                         density = True, color = "#0072B2", alpha = 0.1)
+                x = np.linspace(-4, 4, 301)
+                fx = st.norm().pdf(x)
+                plt.plot(x, fx, linestyle = "dashed", color = "#D55E00")
+                plt.tight_layout()
+                plt.savefig(source_dir / f"experiments/ar1/{algorithm}_{np.round(alpha, 2)}_{rep:0>2}.png")
 
 if __name__ == "__main__":
     main()

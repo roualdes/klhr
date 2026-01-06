@@ -27,7 +27,7 @@ def accuracy_experiment():
 
     with open(FILENAME, "a") as f:
         for p in named_products(names, *itrs):
-            command = f"uv run experiment_accuracy.py -v "
+            command = f"uv run experiment_accuracy.py "
             command += f"-M {p.iteration} "
             command += f"{p.algorithm}\n"
             f.write(command)
@@ -49,7 +49,7 @@ def ar1_experiment():
 
     with open(FILENAME, "a") as f:
         for p in named_products(names, *itrs):
-            command = "uv run experiment_ar1.py -v "
+            command = "uv run experiment_ar1.py "
             command += "-M 200_000 "
             command += f"-r {p.rep} "
             command += f"{p.algorithm}\n"
