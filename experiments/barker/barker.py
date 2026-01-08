@@ -1,18 +1,19 @@
-import matplotlib.pyplot as plt
-import pandas as pd
-
 from jax import random
 import jax.numpy as jnp
-
+import matplotlib.pyplot as plt
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, BarkerMH
+import pandas as pd
 
+from models.earnings import Earnings
 
-
-rng_key = random.PRNGKey(0)
+rng_key = random.PRNGKey(204120)
 rng_key, rng_key_ = random.split(rng_key)
 
+earnings = Earnings()
+earn, height = earnings.data()
+model = earnings.model()
 
 # Run NUTS.
 kernel = BarkerMH(model, step_size = 0.1) # NUTS(model)
@@ -20,10 +21,12 @@ num_warmup = 15_000
 num_samples = 15_000
 mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples,
             progress_bar=False)
+
 mcmc.warmup(rng_key_, earn = earn, height = height, collect_warmup=True,
             extra_fields=("adapt_state.step_size", "adapt_state.inverse_mass_matrix"))
 
 warmup_samples = mcmc.get_samples()
+print(warmup_samples)
 print(f"warmup_samples shape = {jnp.shape(warmup_samples['b0'])}")
 
 extras = mcmc.get_extra_fields()
