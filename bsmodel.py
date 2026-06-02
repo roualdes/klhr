@@ -7,11 +7,12 @@ class BSModel():
                  stepsize = 1.0, warn = False):
         self._stan_file = stan_file
         self._data_file = data_file
+        make_args = ["STAN_THREADS=True",
+                     "CXXFLAGS += -march=native",
+                     "STANCFLAGS+= --warn-pedantic --O1"]
         self.model = bs.StanModel(self._stan_file,
                                   data = self._data_file,
-                                  make_args=["STAN_THREADS=True",
-                                             "CXXFLAGS += -march=native",
-                                             "STANCFLAGS+= --warn-pedantic --O1"],
+                                  make_args=make_args,
                                   warn = warn)
 
     def log_density(self, theta, **kws):
@@ -22,6 +23,21 @@ class BSModel():
             pass
         return ld
 
+    # def log_density_batch_1(self, theta, rho, xis, **kws):
+    #     ld = self.model.log_density_batch_1(theta, rho, xis, **kws)
+    #     ld = np.nan_to_num(ld, nan=-np.inf)
+    #     return ld
+
+    # def log_density_batch_2(self, theta, rho1, rho2, xi1s, xi2s, **kws):
+    #     ld = self.model.log_density_batch_2(theta,
+    #                                         rho1,
+    #                                         rho2,
+    #                                         xi1s,
+    #                                         xi2s,
+    #                                         **kws)
+    #     ld = np.nan_to_num(ld, nan=-np.inf)
+    #     return ld
+
     def log_density_gradient(self, theta, **kws):
         ld = -np.inf
         grad = np.zeros_like(theta)
@@ -31,15 +47,15 @@ class BSModel():
             pass
         return ld, grad
 
-    def log_density_hessian(self, theta, **kws):
+    def log_density_hvp(self, theta, v, **kws):
         ld = -np.inf
         D = self.dim()
-        H = np.zeros((D, D))
+        hvp = np.zeros_like(theta)
         try:
-            ld, H = self.model.log_density_hessian(theta)
+            ld, hvp = self.model.log_density_hessian_vector_product(theta, v)
         except Exception as e:
             pass
-        return ld, H
+        return ld, hvp
 
     def dim(self):
         return self.model.param_unc_num()

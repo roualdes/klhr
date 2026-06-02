@@ -23,7 +23,7 @@ from onlinemoments import OnlineMoments
               type=int, default=0,
               help="number of warmup iterations")
 @click.option("-s", "--seed", "seed",
-              type=int, default=530,
+              type=int, default=9823,
               help="seed to initialize the replications")
 @click.option("-f", "--fresh", "start_fresh",
               is_flag=True,

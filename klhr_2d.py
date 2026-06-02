@@ -11,14 +11,13 @@ from onlinepca import OnlinePCA
 from mcmc import MCMCBase
 from windowedadaptation import WindowedAdaptation
 
-class KLHR(MCMCBase):
+class KLHR2D(MCMCBase):
     def __init__(self,
                  bsmodel,
                  theta = None,
                  seed = None,
-                 N = 8,
                  K = 16,
-                 J = 2,
+                 J = 1,
                  l = 0,
                  initscale = 0.1,
                  warmup = 1_000,
@@ -31,7 +30,6 @@ class KLHR(MCMCBase):
                  **kwargs):
         super().__init__(bsmodel, -1, theta = theta, seed = seed)
 
-        self.N = N
         self.K = K
         self.J = J
         self.l = l
@@ -40,7 +38,7 @@ class KLHR(MCMCBase):
         self._scale_clip = scale_clip
         self._gtol = gtol
 
-        self.x, self.w = hermgauss(self.N)
+        self.x, self.w = hermgauss(8)
         # normalize roots and weights
         self.x *= np.sqrt(2)
         self.w /= np.sqrt(np.pi)
@@ -61,98 +59,140 @@ class KLHR(MCMCBase):
         self.acceptance_probability = 0
         self.grad_evals = 0
 
+    def _invlogit(self, x):
+        if x >= 0:
+            z = np.exp(-x)
+            return 1.0 / (1.0 + z)
+        else:
+            z = np.exp(x)
+            return z / (1.0 + z)
+
+    def _corr(self, r):
+        return
+
     def _unpack(self, eta):
-        m = eta[0]
+        m0 = eta[0]
         c = self._scale_clip
-        s = np.exp(np.clip(eta[1], -c, c)) + self._tol
-        return m, s
+        s0 = np.exp(np.clip(eta[1], -c, c)) + self._tol
+        m1 = eta[2]
+        s1 = np.exp(np.clip(eta[3], -c, c)) + self._tol
+        rho = 2 * self._invlogit(eta[4]) - 1
+        return m0, s0, m1, s1, np.clip(rho, -0.99999, 0.99999)
 
     def _logp_grad(self, x):
         l, g = self.model.log_density_gradient(x)
         c = self._grad_clip
         return l, np.clip(g, -c, c)
 
+    def _log_abs_det(self, eta):
+        _, s0, _, s1, r = self._unpack(eta)
+        out = 2 * (np.log(s0) + np.log(s1))
+        out += np.log1p(-(r * r))
+        return out
+
     def KL(self, eta, rho):
-        m, s = self._unpack(eta)
+        m0, s0, m1, s1, r = self._unpack(eta)
         out = 0.0
-        grad = np.zeros(2)
-        for xn, wn in zip(self.x, self.w):
-            y = s * xn + m
-            xi = y * rho + self.theta
-            logp, grad_logp = self._logp_grad(xi)
-            out += wn * logp
-            w_grad_rho = wn * grad_logp.dot(rho)
-            grad[0] += w_grad_rho
-            grad[1] += w_grad_rho * xn * s
-        out += eta[1]
-        grad[1] += 1
+        grad = np.zeros(5)
+        rho0, rho1 = rho
+        one_m_r2 = np.maximum(0.0, 1.0 - r * r)
+        tr = np.sqrt(one_m_r2 + self._tol)
+        for xi, wi in zip(self.x, self.w):
+            zi = s0 * xi + m0
+            for xj, wj in zip(self.x, self.w):
+                zj = m1 + r * s1 * xi + s1 * tr * xj
+                y = zi * rho0 + zj * rho1 + self.theta
+                logp, grad_logp = self._logp_grad(y)
+                wij = wi * wj
+                out += wij * logp
+                grad_rho0 = wij * grad_logp.dot(rho0)
+                grad_rho1 = wij * grad_logp.dot(rho1)
+                grad[0] += grad_rho0
+                grad[1] += grad_rho0 * xi * s0
+                grad[2] += grad_rho1
+                j3 = r * xi + tr * xj
+                grad[3] += grad_rho1 * j3 * s1
+                j4 = one_m_r2 * xi - r * xj * tr
+                grad[4] += grad_rho1 * s1 * 0.5 * j4
+        out += self._log_abs_det(eta)
+        grad[1] += 2
+        grad[3] += 2
+        grad[4] -= np.tanh(0.5 * eta[4])
         return -out, -grad
 
     def logp_grad_rho(self, xi, rho):
-        l, g = self.model.log_density_gradient(xi * rho + self.theta)
-        return -l, -g.dot(rho)
+        rho0, rho1 = rho
+        y = xi[0] * rho0 + xi[1] * rho1 + self.theta
+        l, g = self.model.log_density_gradient(y)
+        return -l, -np.array([g.dot(rho0), g.dot(rho1)])
 
     def fit(self, rho):
         o = minimize(self.logp_grad_rho,
-                     self.rng.normal() * self._initscale,
+                     self.rng.normal(size = 2) * self._initscale,
                      args = (rho,),
                      jac = True,
                      method = "BFGS")
         self.grad_evals += o["nfev"]
-        h = o["hess_inv"][0, 0]
-        s = 0.0
-        if h > 0 and np.isfinite(h):
-            s = 0.5 * np.log(h)
-        init = np.array([o.x[0], s])
+        h0 = o["hess_inv"][0, 0]
+        s0 = 0.0
+        if h0 > 0 and np.isfinite(h0):
+            s0 = 0.5 * np.log(h0)
+        h1 = o["hess_inv"][1, 1]
+        s1 = 0.0
+        if h1 > 0 and np.isfinite(h1):
+            s1 = 0.5 * np.log(h1)
 
+        init = np.array([o.x[0], s0, o.x[1], s1, 0.0])
         o = minimize(self.KL,
                      init,
                      args = (rho,),
                      jac = True,
                      method = "BFGS",
-                     options = {"gtol": self._gtol, "maxiter": 4})
-        self.grad_evals += o["nfev"] * self.N
+                     options = {"gtol": self._gtol})
+        self.grad_evals += o["nfev"] * 8
         return o.x
 
     def _random_direction(self):
-        evals = self._eigvals
-        p = evals / np.sum(evals)
-        j = self.rng.choice(np.size(p), p = p)
-        m = self._eigvecs[:, j]
         S = np.diag(self._cov)
-        rho = self.rng.multivariate_normal(m, S)
-        return rho / np.linalg.norm(rho + self._tol)
+        rho0 = self.rng.multivariate_normal(self._eigvecs[:, 0], S)
+        while True:
+            n0 = np.linalg.norm(rho0)
+            if n0 < self._tol:
+                rho0 = self.rng.multivariate_normal(self._eigvecs[:, 0], S)
+            else:
+                break
+        rho0 /= np.linalg.norm(rho0)
+        rho1 = self.rng.multivariate_normal(np.zeros_like(rho0), S)
+        while True:
+            n1 = np.linalg.norm(rho1)
+            if n1 < self._tol:
+                rho1 = self.rng.multivariate_normal(np.zeros_like(rho0), S)
+            else:
+                break
+        rho1 -= rho0.dot(rho1) * rho0
+        rho1 /= np.linalg.norm(rho1)
+        return rho0, rho1
 
-    def _log_q(self, x, eta):
-        m, s = self._unpack(eta)
-        z = (x - m) / s
-        return -np.log(s) - 0.5 * z * z
-
-    def _overrelaxed_proposal(self, eta):
-        m, s = self._unpack(eta)
-        K = self.K
-        Normal = st.norm(m, s)
-        u = Normal.cdf(np.zeros(1))
-        r = st.binom(K, u).rvs(random_state = self.rng)
-        up = 0
-        if r > K - r:
-            v = st.beta(K - r + 1, 2 * r - K).rvs(random_state = self.rng)
-            up = u * v
-        elif r < K - r:
-            v = st.beta(r + 1, K - 2 * r).rvs(random_state = self.rng)
-            up = 1 - (1 - u) * v
-        elif r == K - r:
-            up = u
-        return Normal.ppf(up)
+    def _sigma(self, eta):
+        _, s0, _, s1, r = self._unpack(eta)
+        s02 = s0 * s0
+        s12 = s1 * s1
+        od = r * s0 * s1
+        return np.array([[s02, od], [od, s12]])
 
     def _metropolis_step(self, eta, rho):
-        xi = self._overrelaxed_proposal(eta)
-        thetap = xi * rho + self.theta
+        m0, _, m1, _, _ = self._unpack(eta)
+        m = np.array([m0, m1])
+        S = self._sigma(eta)
+        mvn = st.multivariate_normal(m, S)
+        xi = mvn.rvs()
+        rho0, rho1 = rho
+        thetap = xi[0] * rho0 + xi[1] * rho1 + self.theta
 
         r = self.model.log_density(thetap)
         r -= self.model.log_density(self.theta)
-        r += self._log_q(0, eta)
-        r -= self._log_q(xi[0], eta)
+        r += mvn.logpdf(np.zeros_like(xi))
+        r -= mvn.logpdf(xi)
 
         self.grad_evals += 2
 
@@ -189,8 +229,7 @@ if __name__ == "__main__":
 
     import bridgestan as bs
     from bsmodel import BSModel
-    from klhr_sinh import KLHRSINH
-    from klhr import KLHR
+    from klhr_2d import KLHR2D
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
 
@@ -199,11 +238,8 @@ if __name__ == "__main__":
     bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
                        data_file = source_dir / f"stan/{model}.json")
 
-    algo = KLHR(bs_model)
-
-    rng = np.random.default_rng()
-    rho = rng.multivariate_normal(np.zeros(algo.D), np.eye(algo.D))
-    rho /= np.linalg.norm(rho)
+    algo = KLHR2D(bs_model, seed = 678)
+    rho = algo._random_direction()
 
     def f(x):
         def inner(x):
@@ -211,7 +247,7 @@ if __name__ == "__main__":
             return np.apply_along_axis(vf, axis=0, arr=x)
         return np.array([inner(x)])
 
-    x = rng.normal(size = 2) * 0.1
+    x = algo.rng.normal(size = 5) * 0.1
     approx_grad = jacobian(f, x)
     grad = algo.KL(x, rho)[1]
     assert np.all(approx_grad.success)

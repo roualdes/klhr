@@ -29,7 +29,9 @@ class OnlinePCA():
         nv = np.linalg.norm(self.v, axis = 0)
         if np.any(np.isnan(nv) | np.isinf(nv)):
             nv = np.zeros_like(self.v)
-        return nv + self.tol
+        n = self.n
+        return (n / (n + 5.0)) * nv + 1e-3 * (5.0 / (n + 5.0))
+
 
     def vectors(self):
         return self.v / (self.values())

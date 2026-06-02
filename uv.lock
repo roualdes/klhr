@@ -4,16 +4,24 @@ requires-python = ">=3.14"
 
 [[package]]
 name = "bridgestan"
-version = "2.7.0"
-source = { registry = "https://pypi.org/simple" }
+source = { directory = "../bridgestan/python" }
 dependencies = [
     { name = "dllist" },
     { name = "numpy" },
     { name = "stanio" },
 ]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/24/86/8ae81ff14bb38bc853f64cfba49bc26d9fb4a58568d62b4888dba4f8da07/bridgestan-2.7.0-py3-none-any.whl", hash = "sha256:8995bcce4750d8eee0c9354c31ba8778b0b925a510f58b5dda4ed42a8a009142", size = 11945, upload-time = "2025-09-09T14:45:48.882Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "black", marker = "extra == 'dev'" },
+    { name = "dllist", specifier = "~=2.0.0" },
+    { name = "isort", marker = "extra == 'dev'" },
+    { name = "numpy" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "pytest-cov", marker = "extra == 'test'" },
+    { name = "stanio", specifier = "~=0.5.1" },
 ]
+provides-extras = ["test", "dev"]
 
 [[package]]
 name = "click"
@@ -230,7 +238,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "bridgestan", specifier = ">=2.7.0" },
+    { name = "bridgestan", directory = "../bridgestan/python" },
     { name = "click", specifier = ">=8.3.1" },
     { name = "cmdstanpy", specifier = ">=1.3.0" },
     { name = "duckdb", specifier = ">=1.4.3" },

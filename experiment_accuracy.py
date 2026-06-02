@@ -12,6 +12,8 @@ from klhr import KLHR
 from klhr_sinh import KLHRSINH
 from klhr_sub_sinh import KLHRSUBSINH
 from slice import Slice
+from klhr_step import KLHRStep
+
 from mh import MH
 from onlinemoments import OnlineMoments
 
@@ -30,21 +32,27 @@ from onlinemoments import OnlineMoments
               help="erase database before experiments")
 @click.argument("algorithm", type=str)
 def main(M, warmup, seed, start_fresh, algorithm):
-    dbpath = "experiments.db"
-    db.init_accuracy(dbpath, start_fresh)
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
-
     model = "normal"
     source_dir = Path(__file__).resolve().parent
     bs_model = BSModel(stan_file = source_dir / f"stan/{model}.stan",
                        data_file = source_dir / f"stan/{model}.json")
 
+    dbpath = "experiments.db"
+    tbl = "accuracy"
+    db.make_table(dbpath, bs_model, tbl ,start_fresh)
+
     algorithms = {
         "klhr": KLHR,
         "klhr_sinh": KLHRSINH,
         "klhr_sub_sinh": KLHRSUBSINH,
-        "slice": Slice
+        "slice": Slice,
+        "klhr_step": KLHRStep,
     }
+
+    if seed < 0:
+        seed = np.random.SeedSequence().entropy
+
     algo = algorithms[algorithm](bs_model,
                                  warmup = warmup,
                                  seed = seed)
@@ -66,7 +74,14 @@ def main(M, warmup, seed, start_fresh, algorithm):
         "ld_evals": ldevals,
         "runtime": runtime,
     }
-    db.append_df(dbpath, "funnel", d)
+    db.update_table(dbpath,
+                    tbl,
+                    algorithm,
+                    algo,
+                    klhr_draws,
+                    warmup,
+                    0,
+                    runtime)
 
     # when D = 2 => stepsize = 2.4
     # when D = 100 => stepsize = 0.24
@@ -88,7 +103,17 @@ def main(M, warmup, seed, start_fresh, algorithm):
         "ld_evals": mh._ld_evals,
         "runtime": runtime,
     }
-    db.append_df(dbpath, "funnel", d)
+    # TODO fix this name mismatch
+    mh.grad_evals = mh._ld_evals
+    db.update_table(dbpath,
+                    tbl,
+                    "mh",
+                    mh,
+                    mh_draws,
+                    warmup,
+                    0,
+                    runtime)
+
 
     stats_klhr = {
         "om": OnlineMoments(algo.D),

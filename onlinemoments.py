@@ -19,7 +19,9 @@ class OnlineMoments():
 
     def var(self):
         if self.N > 2:
-            return self.v * self.N / (self.N - 1)
+            var = self.v * self.N / (self.N - 1)
+            n = self.N
+            return (n / (n + 5.0)) * var + 1e-3 * (5.0 / (n + 5.0))
         return np.ones(self.D)
 
     def reset(self):

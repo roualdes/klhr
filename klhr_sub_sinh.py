@@ -14,7 +14,7 @@ class KLHRSUBSINH(MCMCBase):
     def __init__(self, bsmodel,
                  theta = None,
                  seed = None,
-                 N = 6,
+                 N = 8,
                  K = 16,
                  J = 2,
                  l = 0,
@@ -153,16 +153,13 @@ class KLHRSUBSINH(MCMCBase):
         s = 0.0
         if h > 0 and np.isfinite(h):
             s = 0.5 * np.log(h)
-        init = np.zeros(3)
-        init[0] = o.x[0]
-        init[1] = s
+        init = np.array([o.x[0], s, 0.0])
         o = minimize(self.KL,
                      init,
                      args = (rho,),
                      jac = True,
                      method = "BFGS",
-                     options = {"gtol": self._gtol})
-        self.grad_evals += o["nfev"] * self.N
+                     options = {"gtol": self._gtol, "maxiter": 4})
         return o.x
 
     def _random_direction(self):
@@ -177,13 +174,13 @@ class KLHRSUBSINH(MCMCBase):
     def _overrelaxed_proposal(self, eta):
         K = self.K
         u = self._CDF(np.zeros(1), eta)
-        r = st.binom(K, u).rvs()
+        r = st.binom(K, u).rvs(random_state = self.rng)
         up = 0
         if r > K - r:
-            v = st.beta(K - r + 1, 2 * r - K).rvs()
+            v = st.beta(K - r + 1, 2 * r - K).rvs(random_state = self.rng)
             up = u * v
         elif r < K - r:
-            v = st.beta(r + 1, K - 2 * r).rvs()
+            v = st.beta(r + 1, K - 2 * r).rvs(random_state = self.rng)
             up = 1 - (1 - u) * v
         elif r == K - r:
             up = u
