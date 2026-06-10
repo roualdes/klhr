@@ -212,7 +212,6 @@ output*
 stan/*
 !stan/*.stan
 !stan/*.json
-*.txt
 *.sh
 *.out
 .virtual_documents/
