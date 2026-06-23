@@ -1,0 +1,34 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "llvm-omp",
+      "displayName": "macOS Homebrew LLVM + OpenMP",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/llvm-openmp",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++",
+        "OpenMP_ROOT": "/opt/homebrew/opt/libomp"
+      }
+    },
+    {
+      "name": "gcc-omp",
+      "displayName": "macOS Homebrew GCC + OpenMP",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/gcc-openmp",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/bin/g++-16"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "llvm-omp",
+      "configurePreset": "llvm-omp"
+    },
+    {
+      "name": "gcc-omp",
+      "configurePreset": "gcc-omp"
+    }
+  ]
+}

@@ -36,7 +36,7 @@ Eigen::VectorXd normed_hermite_n(const Eigen::VectorXd& x, std::size_t n) {
 
 }  // namespace detail
 
-std::pair<Eigen::VectorXd, Eigen::VectorXd> gauss_hermite(std::size_t N) {
+void gauss_hermite(std::size_t N, Eigen::VectorXd& ws, Eigen::VectorXd& xs) {
   if (N == 0) {
     throw std::invalid_argument("gauss_hermite: N must be positive");
   }
@@ -78,8 +78,6 @@ std::pair<Eigen::VectorXd, Eigen::VectorXd> gauss_hermite(std::size_t N) {
   Eigen::VectorXd w = fm.array().square().inverse().matrix();
 
   // symmetrize
-  Eigen::VectorXd xs(n);
-  Eigen::VectorXd ws(n);
   for (Eigen::Index i = 0; i < n; ++i) {
     const Eigen::Index j = n - 1 - i;
     ws(i) = 0.5 * (w(i) + w(j));
@@ -88,8 +86,6 @@ std::pair<Eigen::VectorXd, Eigen::VectorXd> gauss_hermite(std::size_t N) {
 
   // Normalize so integral of 1 against exp(-x^2) is sqrt(pi).
   ws *= std::sqrt(pi) / ws.sum();
-
-  return {xs, ws};
 }
 
 } // namespace klhr

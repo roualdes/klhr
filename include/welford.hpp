@@ -53,6 +53,10 @@ public:
     return Eigen::VectorXd::Constant(D_, std::numeric_limits<double>::quiet_NaN());
   }
 
+  Eigen::VectorXd std() const {
+    return variance().cwiseSqrt();
+  }
+
   /**
    * @brief Return the number of observations.
    *
