@@ -19,6 +19,8 @@ endif()
 
 set(SOURCES
   include/sinh_asinh.hpp
+  include/onlinepca.hpp
+  include/windowedadaptation.hpp
   include/klhr.hpp
   include/gausshermite.hpp
   include/welford.hpp

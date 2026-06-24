@@ -13,10 +13,11 @@ public:
   /**
    * @brief Initialize with zero observations.
    */
-  WelfordAccumulator(std::size_t D) : D_(D) {
-    m_.resize(D);
-    v_.resize(D);
-  }
+  WelfordAccumulator(std::size_t D) :
+    D_(D),
+    n_(0),
+    m_(Eigen::VectorXd::Zero(static_cast<Eigen::Index>(D))),
+    v_(Eigen::VectorXd::Zero(static_cast<Eigen::Index>(D))) {}
 
   /**
    * @brief Update mean, variance, and number of observations.
@@ -45,12 +46,21 @@ public:
    *
    * @return The variance, so far.
    */
-  Eigen::VectorXd variance() const {
+  Eigen::VectorXd unregularized_variance() const {
     const double N = static_cast<double>(n_);
     if (n_ > 1) {
       return v_ * N / (N - 1);
     }
     return Eigen::VectorXd::Constant(D_, std::numeric_limits<double>::quiet_NaN());
+  }
+
+  Eigen::VectorXd variance() const {
+    const double N = static_cast<double>(n_);
+    if (n_ > 2) {
+      return (N / (N + 5.0)) * unregularized_variance().array()
+        + 1e-3 * (5.0 / (N + 5.0));
+    }
+    return Eigen::VectorXd::Ones(static_cast<Eigen::Index>(D_));
   }
 
   Eigen::VectorXd std() const {

@@ -3,8 +3,11 @@
 #include "bfgs.hpp"
 #include "bridgestan.hpp"
 #include "gausshermite.hpp"
+#include "onlinepca.hpp"
 #include "rng.hpp"
 #include "sinh_asinh.hpp"
+#include "welford.hpp"
+#include "windowedadaptation.hpp"
 
 #include <omp.h>
 
@@ -21,9 +24,8 @@
 #include <ranges>
 #include <random>
 #include <string>
+#include <tuple>
 #include <utility>
-
-#include <iostream>
 
 namespace klhr {
 
@@ -35,6 +37,11 @@ struct KlhrOptions {
   double grad_clip = 1e15;
   double scale_clip = 300;
   double gtol = 1e-3;
+  std::size_t warmup = 1'000;
+  std::size_t windowsize = 50;
+  std::size_t windowscale = 2;
+  std::size_t J = 2;
+  double l = 0.0;
 };
 
 class KLHR {
@@ -49,7 +56,10 @@ public:
     uniform_uint_(),
     std_uniform_(0.0, 1.0),
     std_normal_(0.0, 1.0),
-    opts_(options) {
+    opts_(options),
+    windowed_adaptation_(options.warmup, options.windowsize, options.windowscale),
+    online_moments_(bsm_.dim()),
+    online_pca_(bsm_.dim(), options.J, options.l, options.tol) {
 
     if (opts_.seed == 0) {
       std::random_device rd;
@@ -66,7 +76,14 @@ public:
     x_ *= std::sqrt(2.0);
     w_ /= std::sqrt(std::numbers::pi);
 
+    const Eigen::Index D = static_cast<Eigen::Index>(dim());
+    mean_ = Eigen::VectorXd::Zero(D);
+    cov_ = Eigen::VectorXd::Ones(D);
+    eigvecs_ = Eigen::MatrixXd::Zero(D, static_cast<Eigen::Index>(opts_.J + 1));
+    eigvals_ = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(opts_.J + 1));
+
     nfev_ = 0;
+    draw_ = 0;
   }
 
   std::size_t dim() {
@@ -88,7 +105,13 @@ public:
     nfev_ += o.nfev;
 
     double m = o.x(0);
-    double s = approx_normal_tails_(m, 0.1 * (1 + std::abs(m)), rho);
+    double h = o.hess_inv(0, 0);
+    double s;
+    if (std::isfinite(h) && h > 0.0) {
+      s = std::sqrt(h);
+    } else {
+      s = approx_normal_tails_(m, 0.1 * (1 + std::abs(m)), rho);
+    }
     return {m, s};
   }
 
@@ -343,11 +366,35 @@ public:
   Eigen::VectorXd draw() {
     ++draw_;
     Eigen::VectorXd theta = sinh_KL_step();
+    adapt_warmup_(theta);
     return bsm_.param_constrain(theta);
   }
 
   Eigen::VectorXd random_direction() {
-    return normal_(dim());
+    Eigen::VectorXd weights = eigvals_.cwiseMax(0.0);
+    double weight_sum = weights.sum();
+    if (!std::isfinite(weight_sum) || weight_sum <= 0.0) {
+      weights.setOnes();
+      weight_sum = weights.sum();
+    }
+
+    std::discrete_distribution<std::size_t> component(weights.data(),
+                                                      weights.data() + weights.size());
+    const std::size_t j = component(rng_);
+
+    Eigen::VectorXd rho(dim());
+    const Eigen::VectorXd center = eigvecs_.col(static_cast<Eigen::Index>(j));
+    for (Eigen::Index d = 0; d < rho.size(); ++d) {
+      const double variance = std::max(cov_(d), opts_.tol);
+      rho(d) = center(d) + std::sqrt(variance) * std_normal_(rng_);
+    }
+
+    double norm = rho.norm();
+    if (!std::isfinite(norm) || norm <= opts_.tol) {
+      rho = normal_(dim());
+      norm = rho.norm();
+    }
+    return rho / (norm + opts_.tol);
   }
 
 private:
@@ -361,13 +408,40 @@ private:
   std::normal_distribution<double> std_normal_;
 
   KlhrOptions opts_;
+  WindowedAdaptation windowed_adaptation_;
+  WelfordAccumulator online_moments_;
+  OnlinePCA online_pca_;
 
   Eigen::VectorXd theta_;
   Eigen::VectorXd x_; // Guass-Hermite sample points
   Eigen::VectorXd w_; // and weights
+  Eigen::VectorXd mean_;
+  Eigen::VectorXd cov_;
+  Eigen::MatrixXd eigvecs_;
+  Eigen::VectorXd eigvals_;
 
   std::size_t draw_;
 
+  void adapt_warmup_(const Eigen::VectorXd& theta) {
+    if (draw_ > opts_.warmup) {
+      return;
+    }
+
+    if (windowed_adaptation_.window_closed(draw_)) {
+      mean_ = online_moments_.mean();
+      cov_ = online_moments_.variance();
+      online_moments_.reset();
+
+      if (opts_.J > 0) {
+        eigvecs_.leftCols(static_cast<Eigen::Index>(opts_.J)) = online_pca_.vectors();
+        eigvals_.head(static_cast<Eigen::Index>(opts_.J)) = online_pca_.values();
+      }
+      online_pca_.reset();
+    } else {
+      online_moments_.update(theta);
+      online_pca_.update(theta - mean_);
+    }
+  }
 
   Eigen::VectorXd normal_(const Eigen::Index D) {
     Eigen::VectorXd out(D);

@@ -6,7 +6,7 @@
 #include <utility>
 
 int main() {
-  klhr::KLHR algo{"./stan/garch_model.so", "./stan/garch.json"};
+  klhr::KLHR algo{"./stan/earnings_model.so", "./stan/earnings.json"};
   std::size_t D = algo.dim();
   WelfordAccumulator w{D};
 
@@ -14,7 +14,9 @@ int main() {
   Eigen::VectorXd draw(D);
   for (std::size_t n = 0; n < N; ++n) {
     draw = algo.draw();
-    w.update(draw);
+    if (n >= 15'000) {
+      w.update(draw);
+    }
   }
 
   std::cout << "means: " << w.mean().transpose() << '\n';
