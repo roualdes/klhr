@@ -6,7 +6,7 @@
 #include <utility>
 
 int main() {
-  klhr::KLHR algo{"./stan/earnings_model.so", "./stan/earnings.json"};
+  klhr::KLHR algo{"./stan/garch_model.so", "./stan/garch.json"};
   std::size_t D = algo.dim();
   WelfordAccumulator w{D};
 

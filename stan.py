@@ -2,7 +2,7 @@ import cmdstanpy as csp
 import numpy as np
 import time
 
-model_name = "earnings"
+model_name = "garch"
 model = csp.CmdStanModel(stan_file=f"./stan/{model_name}.stan")
 start = time.perf_counter()
 fit = model.sample(data=f"./stan/{model_name}.json",

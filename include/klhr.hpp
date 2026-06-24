@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <numbers>
 #include <ranges>
 #include <random>
@@ -102,48 +103,55 @@ public:
       g(0) = -grad.dot(rho);
     };
 
-    bfgs::BfgsResult o = bfgs::bfgs(fg, init, {.gtol = 1e-3});
+    bfgs::BfgsResult o = bfgs::bfgs(fg, init, {.gtol = 1e-2});
     nfev_ += o.nfev;
 
     double m = o.x(0);
     double q0 = -o.fun;
 
-    double curvature_h = std::numeric_limits<double>::quiet_NaN();
-    double target_drop = 2.0;
+    double s0 = std::numeric_limits<double>::quiet_NaN();
+    const double target_drop = 2.0;
+    const double min_h = 1e-8;
     if (std::isfinite(o.hess_inv(0, 0)) && o.hess_inv(0, 0) > 0.0) {
-      curvature_h = std::sqrt(2.0 * target_drop * o.hess_inv(0, 0));
+      s0 = std::sqrt(o.hess_inv(0, 0));
     }
-    double min_h = 1e-8;
-    double h = std::isfinite(curvature_h)
-      ? std::max(curvature_h, min_h)
+    double h = std::isfinite(s0)
+      ? std::max(std::sqrt(2.0 * target_drop) * s0, min_h)
       : 0.1 * std::max(1.0, std::abs(m));
 
     double qp = bsm_.log_density_noe((m + h) * rho + theta_);
     double qm = bsm_.log_density_noe((m - h) * rho + theta_);
-    nfev_ += 3;
+    nfev_ += 2;
     double s;
     double e;
-    (void)fit_sas_scale_skew_eigen(q0, qp, qm, h, s, e);
+    (void)fit_sas_scale_skew_eigen(q0, qp, qm, h, s0, s, e);
 
     return {m, s, e};
   }
 
   double fit_sas_scale_skew_eigen(double q0, double qp, double qm,
-                                  double h, double& s_hat, double& e_hat) {
+                                  double h, double s_init,
+                                  double& s_hat, double& e_hat) {
     const double A_obs = qp - qm;
     const double B_obs = qp + qm - 2.0 * q0;
 
     double Dp = q0 - qp;
     double Dm = q0 - qm;
 
-    const double eps = 1e-12;
+    const double eps = opts_.tol;
     Dp = std::max(Dp, eps);
     Dm = std::max(Dm, eps);
 
     double e0 = 0.25 * std::log(Dm / Dp);
     e0 = std::clamp(e0, -5.0, 5.0);
 
-    double u0 = std::sqrt(2.0 * std::sqrt(Dp * Dm));
+    double u0 = std::numeric_limits<double>::quiet_NaN();
+    if (std::isfinite(s_init) && s_init > 0.0) {
+      u0 = h / s_init;
+    }
+    if (!std::isfinite(u0) || u0 <= 0.0) {
+      u0 = std::sqrt(2.0 * std::sqrt(Dp * Dm));
+    }
     u0 = std::max(u0, 1e-8);
 
     Eigen::VectorXd theta(2);
@@ -155,8 +163,8 @@ public:
     Eigen::LevenbergMarquardt<Eigen::NumericalDiff<SASFunctor>> lm(numDiff);
 
     lm.parameters.maxfev = 100;
-    lm.parameters.xtol = 1e-5;
-    lm.parameters.ftol = 1e-5;
+    lm.parameters.xtol = 1e-3;
+    lm.parameters.ftol = 1e-3;
 
     int status = lm.minimize(theta);
 
