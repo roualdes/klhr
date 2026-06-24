@@ -52,8 +52,8 @@ def make_plot(draws, algorithm, rep, source_dir):
               type = float, default=1e-3)
 @click.argument("algorithm", type=str)
 def main(M, warmup, reps, seed, start_fresh, tolerance, algorithm):
-    dbpath = "experiments.db"
-    db.init_relaxationtime(dbpath, start_fresh)
+    # dbpath = "experiments.db"
+    # db.init_relaxationtime(dbpath, start_fresh)
 
     bs.set_bridgestan_path(Path.home().expanduser() / "bridgestan")
     model = "earnings"
@@ -63,7 +63,7 @@ def main(M, warmup, reps, seed, start_fresh, tolerance, algorithm):
 
     dbpath = "experiments.db"
     tbl = "relaxationtime"
-    db.make_table(dbpath, bs_model, tbl, start_fresh)
+    # db.make_table(dbpath, bs_model, tbl, start_fresh)
 
     algorithms = {
         "klhr": KLHR,
@@ -85,14 +85,16 @@ def main(M, warmup, reps, seed, start_fresh, tolerance, algorithm):
         draws = algo.sample(M)
         runtime = time.perf_counter() - start
 
-        db.update_table(dbpath,
-                        tbl,
-                        algorithm,
-                        algo,
-                        draws,
-                        warmup,
-                        rep,
-                        runtime)
+        # db.update_table(dbpath,
+        #                 tbl,
+        #                 algorithm,
+        #                 algo,
+        #                 draws,
+        #                 warmup,
+        #                 rep,
+        #                 runtime)
+        print(f"means: {np.mean(draws[warmup:], axis = 0)}")
+        print(f"vars: {np.var(draws[warmup:], axis = 0, ddof=1)}")
         make_plot(draws, algorithm, rep, source_dir)
 
 if __name__ == "__main__":

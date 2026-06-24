@@ -32,11 +32,13 @@ namespace klhr {
 struct KlhrOptions {
   double stepsize = 1.0;
   std::uint64_t seed = 0;
-  std::size_t N = 16;
+  std::size_t N = 8;
   double tol = 1e-10;
   double grad_clip = 1e15;
   double scale_clip = 300;
   double gtol = 1e-3;
+  std::size_t K = 16;
+  double initscale = 0.1;
   std::size_t warmup = 1'000;
   std::size_t windowsize = 50;
   std::size_t windowscale = 2;
@@ -48,6 +50,7 @@ class KLHR {
 public:
 
   std::size_t nfev_;
+  double acceptance_rate_;
 
   KLHR(std::string stan_file, std::string json_file,
        const KlhrOptions& options = KlhrOptions{}) :
@@ -83,6 +86,7 @@ public:
     eigvals_ = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(opts_.J + 1));
 
     nfev_ = 0;
+    acceptance_rate_ = 0.0;
     draw_ = 0;
   }
 
@@ -241,19 +245,42 @@ public:
   }
 
   Eigen::VectorXd fit(const Eigen::VectorXd& rho) {
-    Eigen::VectorXd init = normal_(2);
+    Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1); // normal_(1) * opts_.initscale;
+    Eigen::VectorXd grad = Eigen::VectorXd::Zero(dim());
+    auto fg = [&, this](const Eigen::VectorXd& x,
+                        double& value, Eigen::VectorXd& g) {
+      g.resize(1);
+      bsm_.log_density_gradient_noe(x(0) * rho + theta_, value, grad);
+      value = -value;
+      g(0) = -grad.dot(rho);
+    };
+
+    bfgs::BfgsResult mode = bfgs::bfgs(fg, mode_init);
+    nfev_ += mode.nfev;
+
+    double log_s = 0.0;
+    const double h = mode.hess_inv(0, 0);
+    if (std::isfinite(h) && h > 0.0) {
+      log_s = 0.5 * std::log(h) + std::log(1.25);
+    }
+
+    Eigen::VectorXd init(2);
+    init << mode.x(0), log_s;
+
     auto kl = [&, this](const Eigen::VectorXd& eta,
                         double& value, Eigen::VectorXd& grad) {
       min_kl(eta, rho, value, grad);
     };
-    bfgs::BfgsResult o = bfgs::bfgs(kl, init);
+    bfgs::BfgsResult o = bfgs::bfgs(kl, init); // , {.gtol = opts_.gtol, .maxiter_bfgs = 4});
+    nfev_ += o.nfev * opts_.N;
     return o.x;
   }
 
   void min_kl(const Eigen::VectorXd& eta, const Eigen::VectorXd& rho,
           double& value, Eigen::VectorXd& grad) {
     auto [mu, sigma] = unpack_(eta);
-    grad.resize(2);
+    value = 0.0;
+    grad = Eigen::VectorXd::Zero(2);
 
     auto xw =
       std::views::iota(Eigen::Index{0}, x_.size()) |
@@ -271,6 +298,7 @@ public:
       y = sigma * xn + mu;
       xi = y * rho + theta_;
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
+      grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
       value += wn * logp;
       w_grad_rho = wn * grad_logp.dot(rho);
       grad(0) += w_grad_rho;
@@ -315,7 +343,7 @@ public:
   Eigen::VectorXd sinh_KL_step() {
     Eigen::VectorXd rho = random_direction();
     auto [mu, sigma, eps] = approx_sinh_kl(rho);
-    double xi = sas_transform_d1(std_normal_(rng_), mu, sigma, eps);
+    double xi = overrelaxed_sas_proposal_(mu, sigma, eps);
     Eigen::VectorXd thetap = xi * rho + theta_;
 
     double r = bsm_.log_density_noe(thetap);
@@ -326,16 +354,17 @@ public:
     nfev_ += 2;
 
     double a = std::log(std_uniform_(rng_)) < std::min(0.0, r);
+    double d = a - acceptance_rate_;
+    acceptance_rate_ += d / draw_;
     theta_ = a * thetap + (1 - a) * theta_;
     return theta_;
   }
 
   Eigen::VectorXd normal_KL_step() {
     Eigen::VectorXd rho = random_direction();
-    // Eigen::VectorXd eta = min_kl(rho);
-    // auto [mu, sigma] = unpack_(eta);
-    auto [mu, sigma] = approx_min_kl(rho);
-    double xi = std_normal_(rng_) * sigma + mu;
+    Eigen::VectorXd eta = fit(rho);
+    auto [mu, sigma] = unpack_(eta);
+    double xi = overrelaxed_normal_proposal_(mu, sigma);
     Eigen::VectorXd thetap = xi * rho + theta_;
 
     double r = bsm_.log_density_noe(thetap);
@@ -346,6 +375,8 @@ public:
     nfev_ += 2;
 
     double a = std::log(std_uniform_(rng_)) < std::min(0.0, r);
+    double d = a - acceptance_rate_;
+    acceptance_rate_ += d / draw_;
     theta_ = a * thetap + (1 - a) * theta_;
     return theta_;
   }
@@ -365,19 +396,13 @@ public:
 
   Eigen::VectorXd draw() {
     ++draw_;
-    Eigen::VectorXd theta = sinh_KL_step();
+    Eigen::VectorXd theta = normal_KL_step();
     adapt_warmup_(theta);
     return bsm_.param_constrain(theta);
   }
 
   Eigen::VectorXd random_direction() {
     Eigen::VectorXd weights = eigvals_.cwiseMax(0.0);
-    double weight_sum = weights.sum();
-    if (!std::isfinite(weight_sum) || weight_sum <= 0.0) {
-      weights.setOnes();
-      weight_sum = weights.sum();
-    }
-
     std::discrete_distribution<std::size_t> component(weights.data(),
                                                       weights.data() + weights.size());
     const std::size_t j = component(rng_);
@@ -443,6 +468,122 @@ private:
     }
   }
 
+  double overrelaxed_normal_proposal_(double mu, double sigma) {
+    sigma = std::max(sigma, opts_.tol);
+    const double u = normal_cdf_((0.0 - mu) / sigma);
+    const double up = overrelaxed_cdf_proposal_(u);
+    return mu + sigma * normal_quantile_(up);
+  }
+
+  double overrelaxed_sas_proposal_(double m, double s, double e) {
+    s = std::max(s, opts_.tol);
+    const double u = normal_cdf_(sas_to_normal_d1(0.0, m, s, e));
+    const double up = overrelaxed_cdf_proposal_(u);
+    return sas_transform_d1(normal_quantile_(up), m, s, e);
+  }
+
+  double overrelaxed_cdf_proposal_(double u) {
+    u = clamp_probability_(u);
+    if (opts_.K == 0) {
+      return clamp_probability_(std_uniform_(rng_));
+    }
+
+    const int K = static_cast<int>(std::min<std::size_t>(
+      opts_.K, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+
+    std::binomial_distribution<int> binomial(K, u);
+    const int r = binomial(rng_);
+
+    double up = u;
+    if (r > K - r) {
+      const double v = beta_(static_cast<double>(K - r + 1),
+                             static_cast<double>(2 * r - K));
+      up = u * v;
+    } else if (r < K - r) {
+      const double v = beta_(static_cast<double>(r + 1),
+                             static_cast<double>(K - 2 * r));
+      up = 1.0 - (1.0 - u) * v;
+    }
+
+    return clamp_probability_(up);
+  }
+
+  double beta_(double a, double b) {
+    std::gamma_distribution<double> gamma_a(a, 1.0);
+    std::gamma_distribution<double> gamma_b(b, 1.0);
+
+    double x = gamma_a(rng_);
+    double y = gamma_b(rng_);
+    double total = x + y;
+    while (!std::isfinite(total) || total <= 0.0) {
+      x = gamma_a(rng_);
+      y = gamma_b(rng_);
+      total = x + y;
+    }
+    return x / total;
+  }
+
+  static double clamp_probability_(double p) {
+    const double eps = std::numeric_limits<double>::epsilon();
+    if (!std::isfinite(p)) {
+      return 0.5;
+    }
+    return std::clamp(p, eps, 1.0 - eps);
+  }
+
+  static double normal_cdf_(double z) {
+    return 0.5 * std::erfc(-z / std::sqrt(2.0));
+  }
+
+  static double normal_quantile_(double p) {
+    p = clamp_probability_(p);
+
+    constexpr double a1 = -3.969683028665376e+01;
+    constexpr double a2 =  2.209460984245205e+02;
+    constexpr double a3 = -2.759285104469687e+02;
+    constexpr double a4 =  1.383577518672690e+02;
+    constexpr double a5 = -3.066479806614716e+01;
+    constexpr double a6 =  2.506628277459239e+00;
+
+    constexpr double b1 = -5.447609879822406e+01;
+    constexpr double b2 =  1.615858368580409e+02;
+    constexpr double b3 = -1.556989798598866e+02;
+    constexpr double b4 =  6.680131188771972e+01;
+    constexpr double b5 = -1.328068155288572e+01;
+
+    constexpr double c1 = -7.784894002430293e-03;
+    constexpr double c2 = -3.223964580411365e-01;
+    constexpr double c3 = -2.400758277161838e+00;
+    constexpr double c4 = -2.549732539343734e+00;
+    constexpr double c5 =  4.374664141464968e+00;
+    constexpr double c6 =  2.938163982698783e+00;
+
+    constexpr double d1 =  7.784695709041462e-03;
+    constexpr double d2 =  3.224671290700398e-01;
+    constexpr double d3 =  2.445134137142996e+00;
+    constexpr double d4 =  3.754408661907416e+00;
+
+    constexpr double plow = 0.02425;
+    constexpr double phigh = 1.0 - plow;
+
+    if (p < plow) {
+      const double q = std::sqrt(-2.0 * std::log(p));
+      return (((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6)
+        / ((((d1 * q + d2) * q + d3) * q + d4) * q + 1.0);
+    }
+
+    if (p > phigh) {
+      const double q = std::sqrt(-2.0 * std::log(1.0 - p));
+      return -(((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6)
+        / ((((d1 * q + d2) * q + d3) * q + d4) * q + 1.0);
+    }
+
+    const double q = p - 0.5;
+    const double r = q * q;
+    return (((((a1 * r + a2) * r + a3) * r + a4) * r + a5) * r + a6) * q
+      / (((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + 1.0);
+  }
+
   Eigen::VectorXd normal_(const Eigen::Index D) {
     Eigen::VectorXd out(D);
     std::generate(out.data(), out.data() + D, [&](){ return std_normal_(rng_); });
@@ -451,7 +592,7 @@ private:
 
   std::pair<double, double> unpack_(const Eigen::VectorXd eta) {
     const double mu = eta(0);
-    const double c = opts_.grad_clip;
+    const double c = opts_.scale_clip;
     const double log_s = std::clamp(eta(1), -c, c);
     const double sigma = exp(log_s) + opts_.tol;
     return {mu, sigma};
