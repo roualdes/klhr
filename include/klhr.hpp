@@ -5,15 +5,10 @@
 #include "gausshermite.hpp"
 #include "onlinepca.hpp"
 #include "rng.hpp"
-#include "sinh_asinh.hpp"
 #include "welford.hpp"
 #include "windowedadaptation.hpp"
 
-#include <omp.h>
-
 #include <Eigen/Dense>
-#include <unsupported/Eigen/NonLinearOptimization>
-#include <unsupported/Eigen/NumericalDiff>
 
 #include <algorithm>
 #include <cmath>
@@ -94,158 +89,8 @@ public:
     return bsm_.dim();
   }
 
-  std::pair<double, double> approx_min_kl(const Eigen::VectorXd& rho) {
-    Eigen::VectorXd init = Eigen::VectorXd::Zero(1);
-    Eigen::VectorXd grad = Eigen::VectorXd::Zero(dim());
-    auto fg = [&, this](const Eigen::VectorXd& x,
-                        double& value, Eigen::VectorXd& g) {
-      g.resize(1);
-      bsm_.log_density_gradient_noe(x(0) * rho + theta_, value, grad);
-      value = -value;
-      g(0) = -grad.dot(rho);
-    };
-
-    bfgs::BfgsResult o = bfgs::bfgs(fg, init, {.gtol = 1e-3});
-    nfev_ += o.nfev;
-
-    double m = o.x(0);
-    double h = o.hess_inv(0, 0);
-    double s;
-    if (std::isfinite(h) && h > 0.0) {
-      s = std::sqrt(h);
-    } else {
-      s = approx_normal_tails_(m, 0.1 * (1 + std::abs(m)), rho);
-    }
-    return {m, s};
-  }
-
-  std::tuple<double, double, double> approx_sinh_kl(const Eigen::VectorXd& rho) {
-    Eigen::VectorXd init = Eigen::VectorXd::Zero(1);
-    Eigen::VectorXd grad = Eigen::VectorXd::Zero(dim());
-    auto fg = [&, this](const Eigen::VectorXd& x,
-                        double& value, Eigen::VectorXd& g) {
-      g.resize(1);
-      bsm_.log_density_gradient_noe(x(0) * rho + theta_, value, grad);
-      value = -value;
-      g(0) = -grad.dot(rho);
-    };
-
-    bfgs::BfgsResult o = bfgs::bfgs(fg, init, {.gtol = 1e-2});
-    nfev_ += o.nfev;
-
-    double m = o.x(0);
-    double q0 = -o.fun;
-
-    double s0 = std::numeric_limits<double>::quiet_NaN();
-    const double target_drop = 2.0;
-    const double min_h = 1e-8;
-    if (std::isfinite(o.hess_inv(0, 0)) && o.hess_inv(0, 0) > 0.0) {
-      s0 = std::sqrt(o.hess_inv(0, 0));
-    }
-    double h = std::isfinite(s0)
-      ? std::max(std::sqrt(2.0 * target_drop) * s0, min_h)
-      : 0.1 * std::max(1.0, std::abs(m));
-
-    double qp = bsm_.log_density_noe((m + h) * rho + theta_);
-    double qm = bsm_.log_density_noe((m - h) * rho + theta_);
-    nfev_ += 2;
-    double s;
-    double e;
-    (void)fit_sas_scale_skew_eigen(q0, qp, qm, h, s0, s, e);
-
-    return {m, s, e};
-  }
-
-  double fit_sas_scale_skew_eigen(double q0, double qp, double qm,
-                                  double h, double s_init,
-                                  double& s_hat, double& e_hat) {
-    const double A_obs = qp - qm;
-    const double B_obs = qp + qm - 2.0 * q0;
-
-    double Dp = q0 - qp;
-    double Dm = q0 - qm;
-
-    const double eps = opts_.tol;
-    Dp = std::max(Dp, eps);
-    Dm = std::max(Dm, eps);
-
-    double e0 = 0.25 * std::log(Dm / Dp);
-    e0 = std::clamp(e0, -5.0, 5.0);
-
-    double u0 = std::numeric_limits<double>::quiet_NaN();
-    if (std::isfinite(s_init) && s_init > 0.0) {
-      u0 = h / s_init;
-    }
-    if (!std::isfinite(u0) || u0 <= 0.0) {
-      u0 = std::sqrt(2.0 * std::sqrt(Dp * Dm));
-    }
-    u0 = std::max(u0, 1e-8);
-
-    Eigen::VectorXd theta(2);
-    theta[0] = std::log(u0);
-    theta[1] = e0;
-
-    SASFunctor functor(A_obs, B_obs);
-    Eigen::NumericalDiff<SASFunctor> numDiff(functor);
-    Eigen::LevenbergMarquardt<Eigen::NumericalDiff<SASFunctor>> lm(numDiff);
-
-    lm.parameters.maxfev = 100;
-    lm.parameters.xtol = 1e-3;
-    lm.parameters.ftol = 1e-3;
-
-    int status = lm.minimize(theta);
-
-    const double alpha_hat = theta[0];
-    const double u_hat = std::exp(alpha_hat);
-
-    s_hat = h / u_hat;
-    e_hat = theta[1];
-
-    return static_cast<double>(status);
-  }
-
-  double approx_normal_tails_(const double m, const double x,
-                              const Eigen::VectorXd& rho) {
-    Eigen::VectorXd theta_m = m * rho + theta_;
-    Eigen::VectorXd theta_x = x * rho + theta_;
-    double dx = bsm_.log_density_noe(theta_x);
-    dx -= bsm_.log_density_noe(theta_m);
-    nfev_ += 2;
-    double s = std::abs(x - m) / std::sqrt(2 * std::abs(dx) + opts_.tol);
-    return s;
-  }
-
-  Eigen::VectorXd NURS_step() {
-    Eigen::VectorXd rho = random_direction();
-    auto [m, s] = approx_min_kl(rho);
-    double stepsize = std_uniform_(rng_) * s / 4.0;
-    double xi_step = (std_uniform_(rng_) - 0.5) * stepsize;
-    double r = bsm_.log_density_noe(xi_step * rho + theta_);
-    r -= bsm_.log_density_noe(theta_);
-    nfev_ += 2;
-    bool a = std::log(std_uniform_(rng_)) < std::min(0.0, r);
-    theta_ += xi_step * rho * a;
-    Eigen::Index B = 128;
-    Eigen::VectorXd xis = linspace_(B, m - 40 * stepsize, m + 40 * stepsize);
-    Eigen::VectorXd lds(B);
-
-    Eigen::setNbThreads(1);
-    #pragma omp parallel for num_threads(4) schedule(static)
-    for (Eigen::Index b = 0; b < B; ++b) {
-      lds[b] = bsm_.log_density_noe(xis(b) * rho + theta_);
-    }
-
-    nfev_ += B;
-    Eigen::VectorXd probs = softmax_(lds);
-    std::discrete_distribution<Eigen::Index> d(probs.data(),
-                                               probs.data() + probs.size());
-    double xi_prop = xis(d(rng_));
-    theta_ += xi_prop * rho;
-    return theta_;
-  }
-
   Eigen::VectorXd fit(const Eigen::VectorXd& rho) {
-    Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1); // normal_(1) * opts_.initscale;
+    Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1);
     Eigen::VectorXd grad = Eigen::VectorXd::Zero(dim());
     auto fg = [&, this](const Eigen::VectorXd& x,
                         double& value, Eigen::VectorXd& g) {
@@ -271,7 +116,7 @@ public:
                         double& value, Eigen::VectorXd& grad) {
       min_kl(eta, rho, value, grad);
     };
-    bfgs::BfgsResult o = bfgs::bfgs(kl, init); // , {.gtol = opts_.gtol, .maxiter_bfgs = 4});
+    bfgs::BfgsResult o = bfgs::bfgs(kl, init, {.gtol = opts_.gtol, .maxiter_bfgs = 4});
     nfev_ += o.nfev * opts_.N;
     return o.x;
   }
@@ -310,12 +155,77 @@ public:
     grad = -grad;
   }
 
+  Eigen::VectorXd fit_sas(const Eigen::VectorXd& rho) {
+    Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1);
+    Eigen::VectorXd target_grad = Eigen::VectorXd::Zero(dim());
+    auto fg = [&, this](const Eigen::VectorXd& x,
+                        double& value, Eigen::VectorXd& g) {
+      g.resize(1);
+      bsm_.log_density_gradient_noe(x(0) * rho + theta_, value, target_grad);
+      value = -value;
+      g(0) = -target_grad.dot(rho);
+    };
+
+    bfgs::BfgsResult mode = bfgs::bfgs(fg, mode_init);
+    nfev_ += mode.nfev;
+
+    double log_s = 0.0;
+    const double h = mode.hess_inv(0, 0);
+    if (std::isfinite(h) && h > 0.0) {
+      log_s = 0.5 * std::log(h) + std::log(1.25);
+    }
+
+    Eigen::VectorXd init(3);
+    init << mode.x(0), log_s, 0.0;
+
+    auto kl = [&, this](const Eigen::VectorXd& eta,
+                        double& value, Eigen::VectorXd& grad) {
+      min_sas_kl(eta, rho, value, grad);
+    };
+    bfgs::BfgsResult o = bfgs::bfgs(kl, init, {.gtol = opts_.gtol, .maxiter_bfgs = 4});
+    nfev_ += o.nfev * opts_.N;
+    return o.x;
+  }
+
+  void min_sas_kl(const Eigen::VectorXd& eta, const Eigen::VectorXd& rho,
+                  double& value, Eigen::VectorXd& grad) {
+    auto [m, s, e] = unpack_sas_(eta);
+    value = 0.0;
+    grad = Eigen::VectorXd::Zero(3);
+
+    double t;
+    double logp;
+    double line_grad;
+    Eigen::VectorXd xi(dim());
+    Eigen::VectorXd grad_logp(dim());
+
+    for (Eigen::Index n = 0; n < x_.size(); ++n) {
+      const double xn = x_(n);
+      const double wn = w_(n);
+      const double a = std::asinh(xn) + e;
+      const double sh = sinh_clipped_(a);
+      const double ch = cosh_clipped_(a);
+      const double th = tanh_clipped_(a);
+
+      t = m + s * sh;
+      xi = t * rho + theta_;
+      bsm_.log_density_gradient_noe(xi, logp, grad_logp);
+      grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
+      line_grad = grad_logp.dot(rho);
+
+      value += wn * (-eta(1) - log_cosh_clipped_(a) - logp);
+      grad(0) -= wn * line_grad;
+      grad(1) += wn * (-1.0 - line_grad * s * sh);
+      grad(2) += wn * (-th - line_grad * s * ch);
+    }
+  }
+
   double log_q(const double x, const double mu, const double sigma) {
     double z = (x - mu) / sigma;
     return -std::log(sigma) - 0.5 * z * z;
   }
 
-  double log_cosh(const double x) {
+  static double log_cosh(const double x) {
     const double ax = std::abs(x);
     return ax + std::log1p(std::exp(-2.0 * ax)) - std::log(2.0);
   }
@@ -323,26 +233,27 @@ public:
   double sas_log_q(const double x, const double m, const double s, const double e) {
     const double z = (x - m) / s;
     const double y = std::asinh(z) - e;
-    const double sh = std::sinh(y);
+    const double sh = sinh_clipped_(y);
 
-    return -std::log(s) + log_cosh(y)
+    return -std::log(s) + log_cosh_clipped_(y)
       - 0.5 * sh * sh
       - 0.5 * std::log1p(z * z);
   }
 
   double sas_transform_d1(double normal_draw, double m, double s, double e) {
-    const double z = std::sinh(std::asinh(normal_draw) + e);
+    const double z = sinh_clipped_(std::asinh(normal_draw) + e);
     return m + s * z;
   }
 
   double sas_to_normal_d1(double x, double m, double s, double e) {
     const double z = (x - m) / s;
-    return std::sinh(std::asinh(z) - e);
+    return sinh_clipped_(std::asinh(z) - e);
   }
 
   Eigen::VectorXd sinh_KL_step() {
     Eigen::VectorXd rho = random_direction();
-    auto [mu, sigma, eps] = approx_sinh_kl(rho);
+    Eigen::VectorXd eta = fit_sas(rho);
+    auto [mu, sigma, eps] = unpack_sas_(eta);
     double xi = overrelaxed_sas_proposal_(mu, sigma, eps);
     Eigen::VectorXd thetap = xi * rho + theta_;
 
@@ -598,18 +509,34 @@ private:
     return {mu, sigma};
   }
 
-  Eigen::VectorXd softmax_(const Eigen::VectorXd& x) {
-    const double max_coeff = x.maxCoeff();
-    Eigen::VectorXd exps = (x.array() - max_coeff).exp();
-    const double sum_exps = exps.sum();
-    // if (!std::isfinite(sum_exps) || sum_exps == 0.0) {
-    //   throw std::runtime_error("softmax failed: invalid normalization constant");
-    // }
-    return exps / sum_exps;
+  std::tuple<double, double, double> unpack_sas_(const Eigen::VectorXd& eta) {
+    const double m = eta(0);
+    const double c = opts_.scale_clip;
+    const double log_s = std::clamp(eta(1), -c, c);
+    const double s = std::exp(log_s) + opts_.tol;
+    const double e = eta(2);
+    return {m, s, e};
   }
 
-  inline Eigen::VectorXd linspace_(Eigen::Index n, double lo, double hi) {
-    return Eigen::VectorXd::LinSpaced(n, lo, hi);
+  double scale_clipped_(double x) const {
+    const double c = opts_.scale_clip;
+    return std::clamp(x, -c, c);
+  }
+
+  double sinh_clipped_(double x) const {
+    return std::sinh(scale_clipped_(x));
+  }
+
+  double cosh_clipped_(double x) const {
+    return std::cosh(scale_clipped_(x));
+  }
+
+  double tanh_clipped_(double x) const {
+    return std::tanh(scale_clipped_(x));
+  }
+
+  double log_cosh_clipped_(double x) const {
+    return log_cosh(scale_clipped_(x));
   }
 };
 

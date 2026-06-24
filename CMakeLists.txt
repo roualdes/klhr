@@ -18,7 +18,6 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 set(SOURCES
-  include/sinh_asinh.hpp
   include/onlinepca.hpp
   include/windowedadaptation.hpp
   include/klhr.hpp

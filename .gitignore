@@ -222,3 +222,4 @@ experiments.txt
 .python-version
 experiments.db
 experiments/run_stan.py
+*.h5
