@@ -21,6 +21,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace klhr {
 
@@ -39,6 +40,14 @@ struct KlhrOptions {
   std::size_t windowscale = 2;
   std::size_t J = 2;
   double l = 0.0;
+  std::size_t initial_fast_adaptation_steps = 100; // 100
+  std::size_t initial_transport_candidates = 8; // 6
+  std::size_t initial_transport_gradient_pca_components = 2;
+  double initial_transport_temperature = 1.0;
+  double initial_transport_log_weight_cap = 5.0; // 5.0
+  double initial_transport_jump_weight = 0.1; // 0.1
+  double initial_transport_gradient_noise = 0.35; // 0.35
+  double initial_transport_gradient_floor = 1e-8;
 };
 
 class KLHR {
@@ -46,6 +55,32 @@ public:
 
   std::size_t nfev_;
   double acceptance_rate_;
+  double log_density_;
+  std::size_t stop_transport_idx_;
+  int diagnostic_phase_;
+  double diagnostic_grad_dot_move_;
+  double diagnostic_cos_grad_move_;
+  double diagnostic_beta_slope_;
+  double diagnostic_logp_gain_;
+  double diagnostic_jump_bonus_;
+  double diagnostic_diag_jump_;
+  double diagnostic_move_norm_;
+  double diagnostic_grad_norm_;
+  Eigen::VectorXd diagnostic_gradient_;
+  Eigen::VectorXd diagnostic_move_;
+  std::size_t diagnostic_candidate_count_;
+  int diagnostic_selected_candidate_;
+  Eigen::VectorXd diagnostic_candidate_log_weight_;
+  Eigen::VectorXd diagnostic_candidate_probability_;
+  Eigen::VectorXd diagnostic_candidate_logp_gain_;
+  Eigen::VectorXd diagnostic_candidate_jump_bonus_;
+  Eigen::VectorXd diagnostic_candidate_diag_jump_;
+  Eigen::VectorXd diagnostic_candidate_move_norm_;
+  Eigen::VectorXd diagnostic_candidate_grad_dot_move_;
+  Eigen::VectorXd diagnostic_candidate_cos_grad_move_;
+  Eigen::VectorXd diagnostic_candidate_beta_slope_;
+  Eigen::VectorXd diagnostic_candidate_delta_beta0_;
+  Eigen::VectorXd diagnostic_candidate_delta_beta1_;
 
   KLHR(std::string stan_file, std::string json_file,
        const KlhrOptions& options = KlhrOptions{}) :
@@ -55,9 +90,16 @@ public:
     std_uniform_(0.0, 1.0),
     std_normal_(0.0, 1.0),
     opts_(options),
-    windowed_adaptation_(options.warmup, options.windowsize, options.windowscale),
+    windowed_adaptation_(options.warmup - std::min(options.initial_fast_adaptation_steps,
+                                                   options.warmup),
+                         options.windowsize,
+                         options.windowscale),
     online_moments_(bsm_.dim()),
-    online_pca_(bsm_.dim(), options.J, options.l, options.tol) {
+    online_pca_(bsm_.dim(), options.J, options.l, options.tol),
+    transport_gradient_pca_(bsm_.dim(),
+                            options.initial_transport_gradient_pca_components,
+                            options.l,
+                            options.tol) {
 
     if (opts_.seed == 0) {
       std::random_device rd;
@@ -77,12 +119,38 @@ public:
     const Eigen::Index D = static_cast<Eigen::Index>(dim());
     mean_ = Eigen::VectorXd::Zero(D);
     cov_ = Eigen::VectorXd::Ones(D);
+    diagnostic_gradient_ = Eigen::VectorXd::Zero(D);
+    diagnostic_move_ = Eigen::VectorXd::Zero(D);
+    diagnostic_candidate_count_ =
+      std::max<std::size_t>(1, opts_.initial_transport_candidates) + 1;
+    const Eigen::Index C =
+      static_cast<Eigen::Index>(diagnostic_candidate_count_);
+    diagnostic_candidate_log_weight_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_probability_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_logp_gain_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_jump_bonus_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_diag_jump_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_move_norm_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_grad_dot_move_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_cos_grad_move_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_beta_slope_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_delta_beta0_ = Eigen::VectorXd::Constant(C, quiet_nan_());
+    diagnostic_candidate_delta_beta1_ = Eigen::VectorXd::Constant(C, quiet_nan_());
     eigvecs_ = Eigen::MatrixXd::Zero(D, static_cast<Eigen::Index>(opts_.J + 1));
     eigvals_ = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(opts_.J + 1));
 
     nfev_ = 0;
     acceptance_rate_ = 0.0;
+    log_density_ = bsm_.log_density_noe(theta_);
+    ++nfev_;
+    stop_transport_idx_ = 0;
     draw_ = 0;
+    mh_draw_ = 0;
+    warmup_draw_ = 0;
+    reset_diagnostics_();
+    initial_fast_adaptation_steps_ =
+      std::min(opts_.initial_fast_adaptation_steps, opts_.warmup);
+    adaptation_warmup_ = opts_.warmup - initial_fast_adaptation_steps_;
   }
 
   std::size_t dim() {
@@ -251,64 +319,49 @@ public:
   }
 
   Eigen::VectorXd sinh_KL_step() {
-    Eigen::VectorXd rho = random_direction();
-    Eigen::VectorXd eta = fit_sas(rho);
-    auto [mu, sigma, eps] = unpack_sas_(eta);
-    double xi = overrelaxed_sas_proposal_(mu, sigma, eps);
-    Eigen::VectorXd thetap = xi * rho + theta_;
+    return sinh_KL_step(random_direction());
+  }
 
-    double r = bsm_.log_density_noe(thetap);
-    r -= bsm_.log_density_noe(theta_);
-    r += sas_log_q(0.0, mu, sigma, eps);
-    r -= sas_log_q(xi, mu, sigma, eps);
-
-    nfev_ += 2;
-
-    double a = std::log(std_uniform_(rng_)) < std::min(0.0, r);
-    double d = a - acceptance_rate_;
-    acceptance_rate_ += d / draw_;
-    theta_ = a * thetap + (1 - a) * theta_;
-    return theta_;
+  Eigen::VectorXd sinh_KL_step(const Eigen::VectorXd& rho) {
+    return sinh_KL_step_(rho, nullptr);
   }
 
   Eigen::VectorXd normal_KL_step() {
-    Eigen::VectorXd rho = random_direction();
-    Eigen::VectorXd eta = fit(rho);
-    auto [mu, sigma] = unpack_(eta);
-    double xi = overrelaxed_normal_proposal_(mu, sigma);
-    Eigen::VectorXd thetap = xi * rho + theta_;
+    return normal_KL_step(random_direction());
+  }
 
-    double r = bsm_.log_density_noe(thetap);
-    r -= bsm_.log_density_noe(theta_);
-    r += log_q(0.0, mu, sigma);
-    r -= log_q(xi, mu, sigma);
-
-    nfev_ += 2;
-
-    double a = std::log(std_uniform_(rng_)) < std::min(0.0, r);
-    double d = a - acceptance_rate_;
-    acceptance_rate_ += d / draw_;
-    theta_ = a * thetap + (1 - a) * theta_;
-    return theta_;
+  Eigen::VectorXd normal_KL_step(const Eigen::VectorXd& rho) {
+    return normal_KL_step_(rho, nullptr);
   }
 
   Eigen::VectorXd Metropolis_step() {
     Eigen::VectorXd thetap = theta_ + normal_(dim()) * opts_.stepsize;
-    double r;
-    double tmp;
-    bsm_.log_density_noe(thetap, r);
-    bsm_.log_density_noe(theta_, tmp);
-    r -= tmp;
+    double proposal_logp;
+    bsm_.log_density_noe(thetap, proposal_logp);
+    ++nfev_;
+    double r = proposal_logp - log_density_;
 
     double a = std::log(std_uniform_(rng_)) < std::min(0.0, r);
-    theta_ = a * thetap + (1 - a) * theta_;
+    if (a) {
+      theta_ = thetap;
+      log_density_ = proposal_logp;
+    }
     return theta_;
   }
 
   Eigen::VectorXd draw() {
     ++draw_;
-    Eigen::VectorXd theta = normal_KL_step();
-    adapt_warmup_(theta);
+    Eigen::VectorXd theta;
+    if (draw_ <= initial_fast_adaptation_steps_) {
+      theta = initial_transport_step_();
+      if (draw_ == initial_fast_adaptation_steps_) {
+        stop_transport_idx_ = draw_;
+      }
+    } else {
+      ++warmup_draw_;
+      theta = sinh_KL_step();
+      adapt_warmup_(theta, warmup_draw_);
+    }
     return bsm_.param_constrain(theta);
   }
 
@@ -335,6 +388,21 @@ public:
 
 private:
 
+  struct StepStats {
+    double accept_prob = 0.0;
+    double scaled_jump = 0.0;
+    bool accepted = false;
+  };
+
+  struct TransportCandidate {
+    Eigen::VectorXd theta;
+    double logp = -std::numeric_limits<double>::infinity();
+    double log_weight = -std::numeric_limits<double>::infinity();
+    double logp_gain = std::numeric_limits<double>::quiet_NaN();
+    double jump_bonus = std::numeric_limits<double>::quiet_NaN();
+    double diag_jump = std::numeric_limits<double>::quiet_NaN();
+  };
+
   mcmcpp::bsmodel bsm_;
   mcmcpp::bsrng bsrng_;
   mcmcpp::rng rng_;
@@ -347,6 +415,7 @@ private:
   WindowedAdaptation windowed_adaptation_;
   WelfordAccumulator online_moments_;
   OnlinePCA online_pca_;
+  OnlinePCA transport_gradient_pca_;
 
   Eigen::VectorXd theta_;
   Eigen::VectorXd x_; // Guass-Hermite sample points
@@ -357,13 +426,499 @@ private:
   Eigen::VectorXd eigvals_;
 
   std::size_t draw_;
+  std::size_t mh_draw_;
+  std::size_t warmup_draw_;
+  std::size_t initial_fast_adaptation_steps_;
+  std::size_t adaptation_warmup_;
 
-  void adapt_warmup_(const Eigen::VectorXd& theta) {
-    if (draw_ > opts_.warmup) {
+  Eigen::VectorXd sinh_KL_step_(const Eigen::VectorXd& rho,
+                                StepStats* stats) {
+    const Eigen::VectorXd theta_before = theta_;
+    Eigen::VectorXd grad(dim());
+    double current_logp = log_density_;
+    bsm_.log_density_gradient_noe(theta_, current_logp, grad);
+    ++nfev_;
+    if (std::isfinite(current_logp)) {
+      log_density_ = current_logp;
+    } else {
+      current_logp = log_density_;
+    }
+    sanitize_gradient_(grad);
+
+    Eigen::VectorXd eta = fit_sas(rho);
+    auto [mu, sigma, eps] = unpack_sas_(eta);
+    const double xi = overrelaxed_sas_proposal_(mu, sigma, eps);
+    Eigen::VectorXd thetap = xi * rho + theta_;
+
+    const double proposal_logp = bsm_.log_density_noe(thetap);
+    double r = proposal_logp - log_density_;
+    r += sas_log_q(0.0, mu, sigma, eps);
+    r -= sas_log_q(xi, mu, sigma, eps);
+
+    ++nfev_;
+
+    const double accept_prob = std::exp(std::min(0.0, r));
+    double a = std::log(std_uniform_(rng_)) < std::min(0.0, r);
+    ++mh_draw_;
+    double d = a - acceptance_rate_;
+    acceptance_rate_ += d / mh_draw_;
+    if (a) {
+      theta_ = thetap;
+      log_density_ = proposal_logp;
+    }
+    if (stats != nullptr) {
+      stats->accept_prob = accept_prob;
+      stats->accepted = a != 0.0;
+      stats->scaled_jump = std::abs(xi) / sas_reference_scale_(sigma, eps);
+    }
+    const int phase = warmup_draw_ <= adaptation_warmup_ ? 1 : 2;
+    record_move_diagnostics_(phase, grad, theta_before, theta_,
+                             current_logp, log_density_);
+    return theta_;
+  }
+
+  Eigen::VectorXd normal_KL_step_(const Eigen::VectorXd& rho,
+                                  StepStats* stats) {
+    const Eigen::VectorXd theta_before = theta_;
+    Eigen::VectorXd grad(dim());
+    double current_logp = log_density_;
+    bsm_.log_density_gradient_noe(theta_, current_logp, grad);
+    ++nfev_;
+    if (std::isfinite(current_logp)) {
+      log_density_ = current_logp;
+    } else {
+      current_logp = log_density_;
+    }
+    sanitize_gradient_(grad);
+
+    Eigen::VectorXd eta = fit(rho);
+    auto [mu, sigma] = unpack_(eta);
+    const double xi = overrelaxed_normal_proposal_(mu, sigma);
+    Eigen::VectorXd thetap = xi * rho + theta_;
+
+    const double proposal_logp = bsm_.log_density_noe(thetap);
+    double r = proposal_logp - log_density_;
+    r += log_q(0.0, mu, sigma);
+    r -= log_q(xi, mu, sigma);
+
+    ++nfev_;
+
+    const double accept_prob = std::exp(std::min(0.0, r));
+    double a = std::log(std_uniform_(rng_)) < std::min(0.0, r);
+    ++mh_draw_;
+    double d = a - acceptance_rate_;
+    acceptance_rate_ += d / mh_draw_;
+    if (a) {
+      theta_ = thetap;
+      log_density_ = proposal_logp;
+    }
+    if (stats != nullptr) {
+      stats->accept_prob = accept_prob;
+      stats->accepted = a != 0.0;
+      stats->scaled_jump = std::abs(xi) / std::max(sigma, opts_.tol);
+    }
+    const int phase = warmup_draw_ <= adaptation_warmup_ ? 1 : 2;
+    record_move_diagnostics_(phase, grad, theta_before, theta_,
+                             current_logp, log_density_);
+    return theta_;
+  }
+
+  Eigen::VectorXd initial_transport_step_() {
+    const Eigen::VectorXd theta_before = theta_;
+    Eigen::VectorXd grad(dim());
+    double current_logp = log_density_;
+    bsm_.log_density_gradient_noe(theta_, current_logp, grad);
+    ++nfev_;
+    if (std::isfinite(current_logp)) {
+      log_density_ = current_logp;
+    } else {
+      current_logp = log_density_;
+    }
+    sanitize_gradient_(grad);
+    update_transport_gradient_pca_(grad);
+
+    const std::vector<Eigen::VectorXd> directions =
+      initial_transport_directions_(grad);
+
+    std::vector<TransportCandidate> candidates;
+    candidates.reserve(directions.size() + 1);
+    TransportCandidate stay;
+    stay.theta = theta_before;
+    stay.logp = current_logp;
+    stay.log_weight = 0.0;
+    stay.logp_gain = 0.0;
+    stay.jump_bonus = 0.0;
+    stay.diag_jump = 0.0;
+    candidates.push_back(stay);
+    for (const Eigen::VectorXd& rho : directions) {
+      candidates.push_back(make_transport_candidate_(rho, theta_before,
+                                                     current_logp));
+    }
+
+    const std::size_t chosen = sample_transport_candidate_(candidates);
+    record_transport_candidate_diagnostics_(candidates, grad, theta_before,
+                                            chosen);
+    if (chosen < candidates.size() && candidates[chosen].theta.allFinite() &&
+        std::isfinite(candidates[chosen].logp)) {
+      theta_ = candidates[chosen].theta;
+      log_density_ = candidates[chosen].logp;
+    }
+    const TransportCandidate& chosen_candidate =
+      chosen < candidates.size() ? candidates[chosen] : candidates.front();
+    record_move_diagnostics_(0, grad, theta_before, theta_, current_logp,
+                             log_density_, chosen_candidate.jump_bonus,
+                             chosen_candidate.diag_jump);
+    return theta_;
+  }
+
+  void update_transport_gradient_pca_(const Eigen::VectorXd& grad) {
+    Eigen::VectorXd normal = grad;
+    const double norm = normal.norm();
+    const double floor = std::max(opts_.initial_transport_gradient_floor,
+                                  opts_.tol);
+    if (!std::isfinite(norm) || norm <= floor) {
+      return;
+    }
+    normal /= norm;
+    transport_gradient_pca_.update(normal);
+  }
+
+  void sanitize_gradient_(Eigen::VectorXd& grad) const {
+    for (Eigen::Index d = 0; d < grad.size(); ++d) {
+      if (!std::isfinite(grad(d))) {
+        grad(d) = 0.0;
+      } else {
+        grad(d) = std::clamp(grad(d), -opts_.grad_clip, opts_.grad_clip);
+      }
+    }
+  }
+
+  std::vector<Eigen::VectorXd> initial_transport_directions_(
+      const Eigen::VectorXd& grad) {
+    const std::size_t n_candidates =
+      std::max<std::size_t>(1, opts_.initial_transport_candidates);
+    std::vector<Eigen::VectorXd> directions;
+    directions.reserve(n_candidates);
+
+    while (directions.size() < n_candidates) {
+      directions.push_back(tangent_transport_direction_(grad));
+    }
+    return directions;
+  }
+
+  Eigen::VectorXd tangent_transport_direction_(const Eigen::VectorXd& grad) {
+    const Eigen::Index D = static_cast<Eigen::Index>(dim());
+    const double noise = std::max(0.0, opts_.initial_transport_gradient_noise);
+    for (std::size_t attempt = 0; attempt < 4; ++attempt) {
+      Eigen::VectorXd rho = normal_(D);
+      rho = project_from_transport_gradient_span_(rho, grad);
+      if (noise > 0.0) {
+        rho += noise * normal_(D);
+        rho = project_from_transport_gradient_span_(rho, grad);
+      }
+      const double norm = rho.norm();
+      if (std::isfinite(norm) && norm > opts_.tol) {
+        return rho / norm;
+      }
+    }
+
+    for (Eigen::Index d = 0; d < D; ++d) {
+      Eigen::VectorXd rho = Eigen::VectorXd::Unit(D, d);
+      rho = project_from_transport_gradient_span_(rho, grad);
+      const double norm = rho.norm();
+      if (std::isfinite(norm) && norm > opts_.tol) {
+        return rho / norm;
+      }
+    }
+
+    return normalized_direction_(normal_(D));
+  }
+
+  Eigen::VectorXd project_from_transport_gradient_span_(
+      const Eigen::VectorXd& direction,
+      const Eigen::VectorXd& grad) {
+    Eigen::VectorXd tangent = direction;
+    std::vector<Eigen::VectorXd> basis;
+    basis.reserve(opts_.initial_transport_gradient_pca_components + 1);
+
+    auto project_normal = [&](Eigen::VectorXd normal) {
+      if (normal.size() != tangent.size()) {
+        return;
+      }
+      for (const Eigen::VectorXd& b : basis) {
+        normal.noalias() -= b.dot(normal) * b;
+      }
+      const double norm = normal.norm();
+      const double floor = std::max(opts_.initial_transport_gradient_floor,
+                                    opts_.tol);
+      if (!std::isfinite(norm) || norm <= floor) {
+        return;
+      }
+      normal /= norm;
+      tangent.noalias() -= normal.dot(tangent) * normal;
+      basis.push_back(normal);
+    };
+
+    project_normal(grad);
+
+    if (transport_gradient_pca_.count() > 0 &&
+        opts_.initial_transport_gradient_pca_components > 0) {
+      const Eigen::MatrixXd normals = transport_gradient_pca_.vectors();
+      const std::size_t max_normals = std::min<std::size_t>(
+        {static_cast<std::size_t>(normals.cols()),
+         transport_gradient_pca_.count(),
+         opts_.initial_transport_gradient_pca_components,
+         dim() > 0 ? dim() - basis.size() : 0});
+      for (std::size_t k = 0; k < max_normals; ++k) {
+        project_normal(normals.col(static_cast<Eigen::Index>(k)));
+      }
+    }
+
+    return tangent;
+  }
+
+  TransportCandidate make_transport_candidate_(const Eigen::VectorXd& rho_in,
+                                               const Eigen::VectorXd& theta_before,
+                                               double current_logp) {
+    const Eigen::VectorXd rho = normalized_direction_(rho_in);
+    Eigen::VectorXd eta = fit_sas(rho);
+    auto [mu, sigma, eps] = unpack_sas_(eta);
+    const double xi = overrelaxed_sas_proposal_(mu, sigma, eps);
+    const Eigen::VectorXd theta_candidate = theta_before + xi * rho;
+    if (!theta_candidate.allFinite()) {
+      return {};
+    }
+
+    const double proposal_logp = bsm_.log_density_noe(theta_candidate);
+    ++nfev_;
+    if (!std::isfinite(proposal_logp)) {
+      return {};
+    }
+
+    const double temperature =
+      std::max(opts_.initial_transport_temperature, opts_.tol);
+    const double cap = std::max(0.0, opts_.initial_transport_log_weight_cap);
+    const double logp_gain =
+      std::clamp((proposal_logp - current_logp) / temperature, -cap, cap);
+    const double jump = diag_scaled_distance_(theta_candidate - theta_before,
+                                              theta_before);
+    const double jump_bonus =
+      std::max(0.0, opts_.initial_transport_jump_weight) * std::log1p(jump);
+
+    TransportCandidate candidate;
+    candidate.theta = theta_candidate;
+    candidate.logp = proposal_logp;
+    candidate.log_weight = logp_gain + jump_bonus;
+    candidate.logp_gain = proposal_logp - current_logp;
+    candidate.jump_bonus = jump_bonus;
+    candidate.diag_jump = jump;
+    return candidate;
+  }
+
+  std::size_t sample_transport_candidate_(
+      const std::vector<TransportCandidate>& candidates) {
+    double max_weight = -std::numeric_limits<double>::infinity();
+    for (const auto& candidate : candidates) {
+      max_weight = std::max(max_weight, candidate.log_weight);
+    }
+    if (!std::isfinite(max_weight)) {
+      return 0;
+    }
+
+    std::vector<double> weights(candidates.size());
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+      if (std::isfinite(candidates[i].log_weight)) {
+        weights[i] = std::exp(candidates[i].log_weight - max_weight);
+      } else {
+        weights[i] = 0.0;
+      }
+    }
+
+    std::discrete_distribution<std::size_t> chosen(weights.begin(), weights.end());
+    return chosen(rng_);
+  }
+
+  double diag_scaled_distance_(const Eigen::VectorXd& delta,
+                               const Eigen::VectorXd& center) const {
+    if (delta.size() == 0 || delta.size() != center.size()) {
+      return 0.0;
+    }
+
+    double dist_sq = 0.0;
+    for (Eigen::Index d = 0; d < delta.size(); ++d) {
+      const double scale = std::max(std::abs(center(d)), 1.0);
+      const double z = delta(d) / scale;
+      dist_sq += z * z;
+    }
+    if (!std::isfinite(dist_sq) || dist_sq <= 0.0) {
+      return 0.0;
+    }
+    return std::sqrt(dist_sq);
+  }
+
+  void reset_diagnostics_() {
+    diagnostic_phase_ = -1;
+    diagnostic_grad_dot_move_ = quiet_nan_();
+    diagnostic_cos_grad_move_ = quiet_nan_();
+    diagnostic_beta_slope_ = quiet_nan_();
+    diagnostic_logp_gain_ = quiet_nan_();
+    diagnostic_jump_bonus_ = quiet_nan_();
+    diagnostic_diag_jump_ = quiet_nan_();
+    diagnostic_move_norm_ = quiet_nan_();
+    diagnostic_grad_norm_ = quiet_nan_();
+    diagnostic_gradient_.setZero();
+    diagnostic_move_.setZero();
+    reset_transport_candidate_diagnostics_();
+  }
+
+  void record_move_diagnostics_(int phase,
+                                const Eigen::VectorXd& grad,
+                                const Eigen::VectorXd& theta_before,
+                                const Eigen::VectorXd& theta_after,
+                                double logp_before,
+                                double logp_after,
+                                double jump_bonus = quiet_nan_(),
+                                double diag_jump = quiet_nan_()) {
+    diagnostic_phase_ = phase;
+    diagnostic_gradient_ = grad;
+    diagnostic_move_ = theta_after - theta_before;
+    diagnostic_grad_norm_ = grad.norm();
+    diagnostic_move_norm_ = diagnostic_move_.norm();
+    diagnostic_grad_dot_move_ = grad.dot(diagnostic_move_);
+    diagnostic_logp_gain_ = logp_after - logp_before;
+    diagnostic_diag_jump_ = std::isfinite(diag_jump) ?
+      diag_jump : diag_scaled_distance_(diagnostic_move_, theta_before);
+    diagnostic_jump_bonus_ = std::isfinite(jump_bonus) ? jump_bonus :
+      std::max(0.0, opts_.initial_transport_jump_weight) *
+      std::log1p(diagnostic_diag_jump_);
+
+    if (diagnostic_grad_norm_ > opts_.tol &&
+        diagnostic_move_norm_ > opts_.tol) {
+      diagnostic_cos_grad_move_ =
+        diagnostic_grad_dot_move_ / (diagnostic_grad_norm_ * diagnostic_move_norm_);
+    } else {
+      diagnostic_cos_grad_move_ = quiet_nan_();
+    }
+
+    if (diagnostic_move_.size() >= 2 &&
+        std::abs(diagnostic_move_(1)) > opts_.tol) {
+      diagnostic_beta_slope_ = diagnostic_move_(0) / diagnostic_move_(1);
+    } else {
+      diagnostic_beta_slope_ = quiet_nan_();
+    }
+
+    if (phase != 0) {
+      reset_transport_candidate_diagnostics_();
+    }
+  }
+
+  void reset_transport_candidate_diagnostics_() {
+    diagnostic_selected_candidate_ = -1;
+    diagnostic_candidate_log_weight_.setConstant(quiet_nan_());
+    diagnostic_candidate_probability_.setConstant(quiet_nan_());
+    diagnostic_candidate_logp_gain_.setConstant(quiet_nan_());
+    diagnostic_candidate_jump_bonus_.setConstant(quiet_nan_());
+    diagnostic_candidate_diag_jump_.setConstant(quiet_nan_());
+    diagnostic_candidate_move_norm_.setConstant(quiet_nan_());
+    diagnostic_candidate_grad_dot_move_.setConstant(quiet_nan_());
+    diagnostic_candidate_cos_grad_move_.setConstant(quiet_nan_());
+    diagnostic_candidate_beta_slope_.setConstant(quiet_nan_());
+    diagnostic_candidate_delta_beta0_.setConstant(quiet_nan_());
+    diagnostic_candidate_delta_beta1_.setConstant(quiet_nan_());
+  }
+
+  void record_transport_candidate_diagnostics_(
+      const std::vector<TransportCandidate>& candidates,
+      const Eigen::VectorXd& grad,
+      const Eigen::VectorXd& theta_before,
+      std::size_t chosen) {
+    reset_transport_candidate_diagnostics_();
+    diagnostic_selected_candidate_ =
+      chosen < candidates.size() ? static_cast<int>(chosen) : -1;
+
+    const std::size_t n = std::min<std::size_t>(
+      candidates.size(), diagnostic_candidate_count_);
+    double max_weight = -std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < n; ++i) {
+      max_weight = std::max(max_weight, candidates[i].log_weight);
+    }
+
+    double total_weight = 0.0;
+    if (std::isfinite(max_weight)) {
+      for (std::size_t i = 0; i < n; ++i) {
+        if (std::isfinite(candidates[i].log_weight)) {
+          total_weight += std::exp(candidates[i].log_weight - max_weight);
+        }
+      }
+    }
+
+    const double grad_norm = grad.norm();
+    for (std::size_t i = 0; i < n; ++i) {
+      const Eigen::Index idx = static_cast<Eigen::Index>(i);
+      const TransportCandidate& candidate = candidates[i];
+      diagnostic_candidate_log_weight_(idx) = candidate.log_weight;
+      diagnostic_candidate_logp_gain_(idx) = candidate.logp_gain;
+      diagnostic_candidate_jump_bonus_(idx) = candidate.jump_bonus;
+      diagnostic_candidate_diag_jump_(idx) = candidate.diag_jump;
+      if (total_weight > 0.0 && std::isfinite(candidate.log_weight)) {
+        diagnostic_candidate_probability_(idx) =
+          std::exp(candidate.log_weight - max_weight) / total_weight;
+      }
+
+      if (!candidate.theta.allFinite() || candidate.theta.size() != theta_before.size()) {
+        continue;
+      }
+      const Eigen::VectorXd move = candidate.theta - theta_before;
+      const double move_norm = move.norm();
+      const double grad_dot_move = grad.dot(move);
+      diagnostic_candidate_move_norm_(idx) = move_norm;
+      diagnostic_candidate_grad_dot_move_(idx) = grad_dot_move;
+      if (grad_norm > opts_.tol && move_norm > opts_.tol) {
+        diagnostic_candidate_cos_grad_move_(idx) =
+          grad_dot_move / (grad_norm * move_norm);
+      }
+      if (move.size() >= 1) {
+        diagnostic_candidate_delta_beta0_(idx) = move(0);
+      }
+      if (move.size() >= 2) {
+        diagnostic_candidate_delta_beta1_(idx) = move(1);
+        if (std::abs(move(1)) > opts_.tol) {
+          diagnostic_candidate_beta_slope_(idx) = move(0) / move(1);
+        }
+      }
+    }
+  }
+
+  static constexpr double quiet_nan_() {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
+  Eigen::VectorXd normalized_direction_(const Eigen::VectorXd& direction) {
+    Eigen::VectorXd rho = direction;
+    double norm = rho.norm();
+    if (!std::isfinite(norm) || norm <= opts_.tol) {
+      rho = normal_(static_cast<Eigen::Index>(dim()));
+      norm = rho.norm();
+    }
+    if (!std::isfinite(norm) || norm <= opts_.tol) {
+      rho = Eigen::VectorXd::Unit(static_cast<Eigen::Index>(dim()), 0);
+      norm = 1.0;
+    }
+    return rho / norm;
+  }
+
+  double sas_reference_scale_(double s, double e) const {
+    const double scale = std::max(s, opts_.tol) *
+      std::max(cosh_clipped_(e), opts_.tol);
+    return std::isfinite(scale) ? scale : opts_.tol;
+  }
+
+  void adapt_warmup_(const Eigen::VectorXd& theta, std::size_t warmup_draw) {
+    if (warmup_draw > adaptation_warmup_) {
       return;
     }
 
-    if (windowed_adaptation_.window_closed(draw_)) {
+    if (windowed_adaptation_.window_closed(warmup_draw)) {
       mean_ = online_moments_.mean();
       cov_ = online_moments_.variance();
       online_moments_.reset();
