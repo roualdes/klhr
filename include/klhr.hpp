@@ -30,7 +30,7 @@ struct KlhrOptions {
   std::uint64_t seed = 0;
   std::size_t N = 8;
   double tol = 1e-10;
-  double grad_clip = 1e15;
+  double grad_clip = std::numeric_limits<double>::infinity(); // 1e15; //
   double scale_clip = 300;
   double gtol = 1e-3;
   std::size_t K = 16;
@@ -41,12 +41,6 @@ struct KlhrOptions {
   std::size_t J = 2;
   double l = 0.0;
   std::size_t initial_fast_adaptation_steps = 100; // 100
-  std::size_t initial_transport_candidates = 8; // 6
-  std::size_t initial_transport_gradient_pca_components = 2;
-  double initial_transport_temperature = 1.0;
-  double initial_transport_log_weight_cap = 5.0; // 5.0
-  double initial_transport_jump_weight = 0.1; // 0.1
-  double initial_transport_gradient_noise = 0.35; // 0.35
   double initial_transport_gradient_floor = 1e-8;
 };
 
@@ -95,11 +89,7 @@ public:
                          options.windowsize,
                          options.windowscale),
     online_moments_(bsm_.dim()),
-    online_pca_(bsm_.dim(), options.J, options.l, options.tol),
-    transport_gradient_pca_(bsm_.dim(),
-                            options.initial_transport_gradient_pca_components,
-                            options.l,
-                            options.tol) {
+    online_pca_(bsm_.dim(), options.J, options.l, options.tol) {
 
     if (opts_.seed == 0) {
       std::random_device rd;
@@ -121,8 +111,7 @@ public:
     cov_ = Eigen::VectorXd::Ones(D);
     diagnostic_gradient_ = Eigen::VectorXd::Zero(D);
     diagnostic_move_ = Eigen::VectorXd::Zero(D);
-    diagnostic_candidate_count_ =
-      std::max<std::size_t>(1, opts_.initial_transport_candidates) + 1;
+    diagnostic_candidate_count_ = 2;
     const Eigen::Index C =
       static_cast<Eigen::Index>(diagnostic_candidate_count_);
     diagnostic_candidate_log_weight_ = Eigen::VectorXd::Constant(C, quiet_nan_());
@@ -415,7 +404,6 @@ private:
   WindowedAdaptation windowed_adaptation_;
   WelfordAccumulator online_moments_;
   OnlinePCA online_pca_;
-  OnlinePCA transport_gradient_pca_;
 
   Eigen::VectorXd theta_;
   Eigen::VectorXd x_; // Guass-Hermite sample points
@@ -535,13 +523,10 @@ private:
       current_logp = log_density_;
     }
     sanitize_gradient_(grad);
-    update_transport_gradient_pca_(grad);
 
-    const std::vector<Eigen::VectorXd> directions =
-      initial_transport_directions_(grad);
-
-    std::vector<TransportCandidate> candidates;
-    candidates.reserve(directions.size() + 1);
+    const Eigen::VectorXd rho = tangent_transport_direction_(grad);
+    TransportCandidate proposal =
+      make_transport_klhr_candidate_(rho, theta_before, current_logp);
     TransportCandidate stay;
     stay.theta = theta_before;
     stay.logp = current_logp;
@@ -549,38 +534,27 @@ private:
     stay.logp_gain = 0.0;
     stay.jump_bonus = 0.0;
     stay.diag_jump = 0.0;
-    candidates.push_back(stay);
-    for (const Eigen::VectorXd& rho : directions) {
-      candidates.push_back(make_transport_candidate_(rho, theta_before,
-                                                     current_logp));
-    }
 
-    const std::size_t chosen = sample_transport_candidate_(candidates);
+    std::vector<TransportCandidate> candidates{stay, proposal};
+    const double log_accept = std::isfinite(proposal.log_weight) ?
+      std::min(0.0, proposal.log_weight) :
+      -std::numeric_limits<double>::infinity();
+    const bool accepted = std::log(std_uniform_(rng_)) <
+      log_accept;
+    const std::size_t chosen = accepted ? 1 : 0;
     record_transport_candidate_diagnostics_(candidates, grad, theta_before,
                                             chosen);
-    if (chosen < candidates.size() && candidates[chosen].theta.allFinite() &&
-        std::isfinite(candidates[chosen].logp)) {
-      theta_ = candidates[chosen].theta;
-      log_density_ = candidates[chosen].logp;
+    ++mh_draw_;
+    const double d = static_cast<double>(accepted) - acceptance_rate_;
+    acceptance_rate_ += d / mh_draw_;
+    if (accepted && proposal.theta.allFinite() && std::isfinite(proposal.logp)) {
+      theta_ = proposal.theta;
+      log_density_ = proposal.logp;
     }
-    const TransportCandidate& chosen_candidate =
-      chosen < candidates.size() ? candidates[chosen] : candidates.front();
     record_move_diagnostics_(0, grad, theta_before, theta_, current_logp,
-                             log_density_, chosen_candidate.jump_bonus,
-                             chosen_candidate.diag_jump);
+                             log_density_, candidates[chosen].jump_bonus,
+                             candidates[chosen].diag_jump);
     return theta_;
-  }
-
-  void update_transport_gradient_pca_(const Eigen::VectorXd& grad) {
-    Eigen::VectorXd normal = grad;
-    const double norm = normal.norm();
-    const double floor = std::max(opts_.initial_transport_gradient_floor,
-                                  opts_.tol);
-    if (!std::isfinite(norm) || norm <= floor) {
-      return;
-    }
-    normal /= norm;
-    transport_gradient_pca_.update(normal);
   }
 
   void sanitize_gradient_(Eigen::VectorXd& grad) const {
@@ -593,29 +567,11 @@ private:
     }
   }
 
-  std::vector<Eigen::VectorXd> initial_transport_directions_(
-      const Eigen::VectorXd& grad) {
-    const std::size_t n_candidates =
-      std::max<std::size_t>(1, opts_.initial_transport_candidates);
-    std::vector<Eigen::VectorXd> directions;
-    directions.reserve(n_candidates);
-
-    while (directions.size() < n_candidates) {
-      directions.push_back(tangent_transport_direction_(grad));
-    }
-    return directions;
-  }
-
   Eigen::VectorXd tangent_transport_direction_(const Eigen::VectorXd& grad) {
     const Eigen::Index D = static_cast<Eigen::Index>(dim());
-    const double noise = std::max(0.0, opts_.initial_transport_gradient_noise);
     for (std::size_t attempt = 0; attempt < 4; ++attempt) {
       Eigen::VectorXd rho = normal_(D);
-      rho = project_from_transport_gradient_span_(rho, grad);
-      if (noise > 0.0) {
-        rho += noise * normal_(D);
-        rho = project_from_transport_gradient_span_(rho, grad);
-      }
+      rho = project_from_current_gradient_(rho, grad);
       const double norm = rho.norm();
       if (std::isfinite(norm) && norm > opts_.tol) {
         return rho / norm;
@@ -624,7 +580,7 @@ private:
 
     for (Eigen::Index d = 0; d < D; ++d) {
       Eigen::VectorXd rho = Eigen::VectorXd::Unit(D, d);
-      rho = project_from_transport_gradient_span_(rho, grad);
+      rho = project_from_current_gradient_(rho, grad);
       const double norm = rho.norm();
       if (std::isfinite(norm) && norm > opts_.tol) {
         return rho / norm;
@@ -634,52 +590,29 @@ private:
     return normalized_direction_(normal_(D));
   }
 
-  Eigen::VectorXd project_from_transport_gradient_span_(
+  Eigen::VectorXd project_from_current_gradient_(
       const Eigen::VectorXd& direction,
-      const Eigen::VectorXd& grad) {
+      const Eigen::VectorXd& grad) const {
     Eigen::VectorXd tangent = direction;
-    std::vector<Eigen::VectorXd> basis;
-    basis.reserve(opts_.initial_transport_gradient_pca_components + 1);
-
-    auto project_normal = [&](Eigen::VectorXd normal) {
-      if (normal.size() != tangent.size()) {
-        return;
-      }
-      for (const Eigen::VectorXd& b : basis) {
-        normal.noalias() -= b.dot(normal) * b;
-      }
-      const double norm = normal.norm();
-      const double floor = std::max(opts_.initial_transport_gradient_floor,
-                                    opts_.tol);
-      if (!std::isfinite(norm) || norm <= floor) {
-        return;
-      }
-      normal /= norm;
-      tangent.noalias() -= normal.dot(tangent) * normal;
-      basis.push_back(normal);
-    };
-
-    project_normal(grad);
-
-    if (transport_gradient_pca_.count() > 0 &&
-        opts_.initial_transport_gradient_pca_components > 0) {
-      const Eigen::MatrixXd normals = transport_gradient_pca_.vectors();
-      const std::size_t max_normals = std::min<std::size_t>(
-        {static_cast<std::size_t>(normals.cols()),
-         transport_gradient_pca_.count(),
-         opts_.initial_transport_gradient_pca_components,
-         dim() > 0 ? dim() - basis.size() : 0});
-      for (std::size_t k = 0; k < max_normals; ++k) {
-        project_normal(normals.col(static_cast<Eigen::Index>(k)));
-      }
+    if (grad.size() != tangent.size()) {
+      return tangent;
     }
+    const double norm = grad.norm();
+    const double floor = std::max(opts_.initial_transport_gradient_floor,
+                                  opts_.tol);
+    if (!std::isfinite(norm) || norm <= floor) {
+      return tangent;
+    }
+    const Eigen::VectorXd normal = grad / norm;
+    tangent.noalias() -= normal.dot(tangent) * normal;
 
     return tangent;
   }
 
-  TransportCandidate make_transport_candidate_(const Eigen::VectorXd& rho_in,
-                                               const Eigen::VectorXd& theta_before,
-                                               double current_logp) {
+  TransportCandidate make_transport_klhr_candidate_(
+      const Eigen::VectorXd& rho_in,
+      const Eigen::VectorXd& theta_before,
+      double current_logp) {
     const Eigen::VectorXd rho = normalized_direction_(rho_in);
     Eigen::VectorXd eta = fit_sas(rho);
     auto [mu, sigma, eps] = unpack_sas_(eta);
@@ -695,47 +628,20 @@ private:
       return {};
     }
 
-    const double temperature =
-      std::max(opts_.initial_transport_temperature, opts_.tol);
-    const double cap = std::max(0.0, opts_.initial_transport_log_weight_cap);
-    const double logp_gain =
-      std::clamp((proposal_logp - current_logp) / temperature, -cap, cap);
+    double r = proposal_logp - current_logp;
+    r += sas_log_q(0.0, mu, sigma, eps);
+    r -= sas_log_q(xi, mu, sigma, eps);
     const double jump = diag_scaled_distance_(theta_candidate - theta_before,
                                               theta_before);
-    const double jump_bonus =
-      std::max(0.0, opts_.initial_transport_jump_weight) * std::log1p(jump);
 
     TransportCandidate candidate;
     candidate.theta = theta_candidate;
     candidate.logp = proposal_logp;
-    candidate.log_weight = logp_gain + jump_bonus;
+    candidate.log_weight = r;
     candidate.logp_gain = proposal_logp - current_logp;
-    candidate.jump_bonus = jump_bonus;
+    candidate.jump_bonus = 0.0;
     candidate.diag_jump = jump;
     return candidate;
-  }
-
-  std::size_t sample_transport_candidate_(
-      const std::vector<TransportCandidate>& candidates) {
-    double max_weight = -std::numeric_limits<double>::infinity();
-    for (const auto& candidate : candidates) {
-      max_weight = std::max(max_weight, candidate.log_weight);
-    }
-    if (!std::isfinite(max_weight)) {
-      return 0;
-    }
-
-    std::vector<double> weights(candidates.size());
-    for (std::size_t i = 0; i < candidates.size(); ++i) {
-      if (std::isfinite(candidates[i].log_weight)) {
-        weights[i] = std::exp(candidates[i].log_weight - max_weight);
-      } else {
-        weights[i] = 0.0;
-      }
-    }
-
-    std::discrete_distribution<std::size_t> chosen(weights.begin(), weights.end());
-    return chosen(rng_);
   }
 
   double diag_scaled_distance_(const Eigen::VectorXd& delta,
@@ -788,9 +694,7 @@ private:
     diagnostic_logp_gain_ = logp_after - logp_before;
     diagnostic_diag_jump_ = std::isfinite(diag_jump) ?
       diag_jump : diag_scaled_distance_(diagnostic_move_, theta_before);
-    diagnostic_jump_bonus_ = std::isfinite(jump_bonus) ? jump_bonus :
-      std::max(0.0, opts_.initial_transport_jump_weight) *
-      std::log1p(diagnostic_diag_jump_);
+    diagnostic_jump_bonus_ = std::isfinite(jump_bonus) ? jump_bonus : 0.0;
 
     if (diagnostic_grad_norm_ > opts_.tol &&
         diagnostic_move_norm_ > opts_.tol) {
@@ -838,18 +742,12 @@ private:
 
     const std::size_t n = std::min<std::size_t>(
       candidates.size(), diagnostic_candidate_count_);
-    double max_weight = -std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < n; ++i) {
-      max_weight = std::max(max_weight, candidates[i].log_weight);
-    }
-
-    double total_weight = 0.0;
-    if (std::isfinite(max_weight)) {
-      for (std::size_t i = 0; i < n; ++i) {
-        if (std::isfinite(candidates[i].log_weight)) {
-          total_weight += std::exp(candidates[i].log_weight - max_weight);
-        }
-      }
+    std::vector<double> probability(n, quiet_nan_());
+    if (n == 2) {
+      const double accept_prob = std::isfinite(candidates[1].log_weight) ?
+        std::exp(std::min(0.0, candidates[1].log_weight)) : 0.0;
+      probability[0] = 1.0 - accept_prob;
+      probability[1] = accept_prob;
     }
 
     const double grad_norm = grad.norm();
@@ -860,9 +758,8 @@ private:
       diagnostic_candidate_logp_gain_(idx) = candidate.logp_gain;
       diagnostic_candidate_jump_bonus_(idx) = candidate.jump_bonus;
       diagnostic_candidate_diag_jump_(idx) = candidate.diag_jump;
-      if (total_weight > 0.0 && std::isfinite(candidate.log_weight)) {
-        diagnostic_candidate_probability_(idx) =
-          std::exp(candidate.log_weight - max_weight) / total_weight;
+      if (std::isfinite(probability[i])) {
+        diagnostic_candidate_probability_(idx) = probability[i];
       }
 
       if (!candidate.theta.allFinite() || candidate.theta.size() != theta_before.size()) {
