@@ -41,6 +41,7 @@ struct KlhrOptions {
   std::size_t J = 2;
   double l = 0.0;
   std::size_t initial_fast_adaptation_steps = 100; // 100
+  std::size_t initial_transport_gradient_diff_history = 6;
   double initial_transport_gradient_floor = 1e-8;
 };
 
@@ -127,6 +128,7 @@ public:
     diagnostic_candidate_delta_beta1_ = Eigen::VectorXd::Constant(C, quiet_nan_());
     eigvecs_ = Eigen::MatrixXd::Zero(D, static_cast<Eigen::Index>(opts_.J + 1));
     eigvals_ = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(opts_.J + 1));
+    transport_gradient_diffs_.reserve(opts_.initial_transport_gradient_diff_history);
 
     nfev_ = 0;
     acceptance_rate_ = 0.0;
@@ -418,6 +420,8 @@ private:
   std::size_t warmup_draw_;
   std::size_t initial_fast_adaptation_steps_;
   std::size_t adaptation_warmup_;
+  std::vector<Eigen::VectorXd> transport_gradient_diffs_;
+  std::size_t transport_gradient_diff_next_ = 0;
 
   Eigen::VectorXd sinh_KL_step_(const Eigen::VectorXd& rho,
                                 StepStats* stats) {
@@ -550,6 +554,7 @@ private:
     if (accepted && proposal.theta.allFinite() && std::isfinite(proposal.logp)) {
       theta_ = proposal.theta;
       log_density_ = proposal.logp;
+      update_transport_gradient_diff_history_(grad);
     }
     record_move_diagnostics_(0, grad, theta_before, theta_, current_logp,
                              log_density_, candidates[chosen].jump_bonus,
@@ -571,7 +576,7 @@ private:
     const Eigen::Index D = static_cast<Eigen::Index>(dim());
     for (std::size_t attempt = 0; attempt < 4; ++attempt) {
       Eigen::VectorXd rho = normal_(D);
-      rho = project_from_current_gradient_(rho, grad);
+      rho = project_from_transport_avoidance_span_(rho, grad);
       const double norm = rho.norm();
       if (std::isfinite(norm) && norm > opts_.tol) {
         return rho / norm;
@@ -580,7 +585,7 @@ private:
 
     for (Eigen::Index d = 0; d < D; ++d) {
       Eigen::VectorXd rho = Eigen::VectorXd::Unit(D, d);
-      rho = project_from_current_gradient_(rho, grad);
+      rho = project_from_transport_avoidance_span_(rho, grad);
       const double norm = rho.norm();
       if (std::isfinite(norm) && norm > opts_.tol) {
         return rho / norm;
@@ -590,23 +595,81 @@ private:
     return normalized_direction_(normal_(D));
   }
 
-  Eigen::VectorXd project_from_current_gradient_(
+  Eigen::VectorXd project_from_transport_avoidance_span_(
       const Eigen::VectorXd& direction,
       const Eigen::VectorXd& grad) const {
     Eigen::VectorXd tangent = direction;
     if (grad.size() != tangent.size()) {
       return tangent;
     }
-    const double norm = grad.norm();
+    const double floor = std::max(opts_.initial_transport_gradient_floor,
+                                  opts_.tol);
+    std::vector<Eigen::VectorXd> basis;
+    basis.reserve(std::min<std::size_t>(
+      transport_gradient_diffs_.size() + 1,
+      tangent.size() > 0 ? static_cast<std::size_t>(tangent.size()) : 0));
+
+    auto project_normal = [&](const Eigen::VectorXd& normal_in) {
+      if (normal_in.size() != tangent.size()) {
+        return;
+      }
+      if (basis.size() + 1 >= static_cast<std::size_t>(tangent.size())) {
+        return;
+      }
+      Eigen::VectorXd normal = normal_in;
+      for (const Eigen::VectorXd& b : basis) {
+        normal.noalias() -= b.dot(normal) * b;
+      }
+      const double norm = normal.norm();
+      if (!std::isfinite(norm) || norm <= floor) {
+        return;
+      }
+      normal /= norm;
+      tangent.noalias() -= normal.dot(tangent) * normal;
+      basis.push_back(normal);
+    };
+
+    project_normal(grad);
+    for (const Eigen::VectorXd& y : transport_gradient_diffs_) {
+      project_normal(y);
+    }
+
+    return tangent;
+  }
+
+  void update_transport_gradient_diff_history_(const Eigen::VectorXd& old_grad) {
+    if (opts_.initial_transport_gradient_diff_history == 0) {
+      return;
+    }
+
+    Eigen::VectorXd new_grad(dim());
+    double new_logp = log_density_;
+    bsm_.log_density_gradient_noe(theta_, new_logp, new_grad);
+    ++nfev_;
+    if (!std::isfinite(new_logp) || new_grad.size() != old_grad.size()) {
+      return;
+    }
+    log_density_ = new_logp;
+    sanitize_gradient_(new_grad);
+
+    const Eigen::VectorXd y = new_grad - old_grad;
+    const double norm = y.norm();
     const double floor = std::max(opts_.initial_transport_gradient_floor,
                                   opts_.tol);
     if (!std::isfinite(norm) || norm <= floor) {
-      return tangent;
+      return;
     }
-    const Eigen::VectorXd normal = grad / norm;
-    tangent.noalias() -= normal.dot(tangent) * normal;
 
-    return tangent;
+    if (transport_gradient_diffs_.size() <
+        opts_.initial_transport_gradient_diff_history) {
+      transport_gradient_diffs_.push_back(y);
+      return;
+    }
+
+    transport_gradient_diffs_[transport_gradient_diff_next_] = y;
+    transport_gradient_diff_next_ =
+      (transport_gradient_diff_next_ + 1) %
+      opts_.initial_transport_gradient_diff_history;
   }
 
   TransportCandidate make_transport_klhr_candidate_(
