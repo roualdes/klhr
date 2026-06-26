@@ -1,7 +1,9 @@
+import argparse
+from pathlib import Path
+
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-from pathlib import Path
 
 def trace_plot(draws, log_density, stop_idx, plot_name):
     plt.clf()
@@ -63,20 +65,35 @@ def scatter_plot(x, y, plot_name):
     plt.savefig(plot_name)
     plt.close()
 
-f = h5py.File("draws/earnings.h5", "r")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file", default="draws/earnings.h5")
+    parser.add_argument("--prefix", default=None)
+    parser.add_argument("--group", default="earnings")
+    args = parser.parse_args()
 
-draws = np.asarray(f["earnings/draws"])
-log_density = np.asarray(f["earnings/log_density"])
-stop_idx = np.asarray(f["earnings/stop_transport_idx"])
-print(f"Stopped transport phase at: {stop_idx}")
-trace_plot(draws, log_density, stop_idx, "draws/earnings_trace_plots.png")
+    path = Path(args.file)
+    prefix = Path(args.prefix) if args.prefix else path.with_suffix("")
+    prefix.parent.mkdir(parents=True, exist_ok=True)
 
-ar = np.asarray(f["earnings/acceptance_rate"])
-acceptance_rate_plot(ar, "draws/earnings_acceptance_rate.png")
+    with h5py.File(path, "r") as f:
+        root = f[args.group]
+        draws = np.asarray(root["draws"])
+        log_density = np.asarray(root["log_density"])
+        stop_idx = int(np.asarray(root["stop_transport_idx"]))
+        print(f"Stopped transport phase at: {stop_idx}")
+        trace_plot(draws, log_density, stop_idx, f"{prefix}_trace_plots.png")
 
-nfev = np.asarray(f["earnings/nfev"])
-mdx = np.arange(np.size(nfev)) + 1
-nfev = nfev.flatten() / mdx
-nfev_plot(nfev, "draws/earnings_nfev.png")
+        ar = np.asarray(root["acceptance_rate"])
+        acceptance_rate_plot(ar, f"{prefix}_acceptance_rate.png")
 
-scatter_plot(draws[:, 0], draws[:, 1], "draws/earnings_scatter_plot.png")
+        nfev = np.asarray(root["nfev"])
+        mdx = np.arange(np.size(nfev)) + 1
+        nfev = nfev.flatten() / mdx
+        nfev_plot(nfev, f"{prefix}_nfev.png")
+
+        scatter_plot(draws[:, 0], draws[:, 1], f"{prefix}_scatter_plot.png")
+
+
+if __name__ == "__main__":
+    main()

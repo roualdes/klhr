@@ -25,6 +25,16 @@
 
 namespace klhr {
 
+enum class TransportApproximation {
+  Sas,
+  Normal
+};
+
+enum class TransportProposal {
+  Overrelaxed,
+  Random
+};
+
 struct KlhrOptions {
   double stepsize = 1.0;
   std::uint64_t seed = 0;
@@ -41,8 +51,13 @@ struct KlhrOptions {
   std::size_t J = 2;
   double l = 0.0;
   std::size_t initial_fast_adaptation_steps = 100; // 100
-  std::size_t initial_transport_gradient_history = 2;
+  std::size_t initial_transport_gradient_history = 3;
+  double initial_transport_gradient_projection_probability = 0.5;
   double initial_transport_gradient_floor = 1e-8;
+  TransportApproximation initial_transport_approximation =
+    TransportApproximation::Sas;
+  TransportProposal initial_transport_proposal =
+    TransportProposal::Overrelaxed;
 };
 
 class KLHR {
@@ -597,7 +612,7 @@ private:
 
   Eigen::VectorXd project_from_transport_avoidance_span_(
       const Eigen::VectorXd& direction,
-      const Eigen::VectorXd& grad) const {
+      const Eigen::VectorXd& grad) {
     Eigen::VectorXd tangent = direction;
     if (grad.size() != tangent.size()) {
       return tangent;
@@ -630,8 +645,17 @@ private:
     };
 
     project_normal(grad);
+    double projection_probability =
+      opts_.initial_transport_gradient_projection_probability;
+    if (!std::isfinite(projection_probability)) {
+      projection_probability = 1.0;
+    }
+    projection_probability = std::clamp(projection_probability, 0.0, 1.0);
     for (const Eigen::VectorXd& recent_grad : transport_gradients_) {
-      project_normal(recent_grad);
+      if (projection_probability >= 1.0 ||
+          std_uniform_(rng_) < projection_probability) {
+        project_normal(recent_grad);
+      }
     }
 
     return tangent;
@@ -675,10 +699,57 @@ private:
       const Eigen::VectorXd& rho_in,
       const Eigen::VectorXd& theta_before,
       double current_logp) {
+    if (opts_.initial_transport_approximation ==
+        TransportApproximation::Normal) {
+      return make_normal_transport_candidate_(rho_in, theta_before,
+                                              current_logp);
+    }
+    return make_sas_transport_candidate_(rho_in, theta_before, current_logp);
+  }
+
+  TransportCandidate make_normal_transport_candidate_(
+      const Eigen::VectorXd& rho_in,
+      const Eigen::VectorXd& theta_before,
+      double current_logp) {
+    const Eigen::VectorXd rho = normalized_direction_(rho_in);
+    Eigen::VectorXd eta = fit(rho);
+    auto [mu, sigma] = unpack_(eta);
+    const double xi = transport_normal_proposal_(mu, sigma);
+    const Eigen::VectorXd theta_candidate = theta_before + xi * rho;
+    if (!theta_candidate.allFinite()) {
+      return {};
+    }
+
+    const double proposal_logp = bsm_.log_density_noe(theta_candidate);
+    ++nfev_;
+    if (!std::isfinite(proposal_logp)) {
+      return {};
+    }
+
+    double r = proposal_logp - current_logp;
+    r += log_q(0.0, mu, sigma);
+    r -= log_q(xi, mu, sigma);
+    const double jump = diag_scaled_distance_(theta_candidate - theta_before,
+                                              theta_before);
+
+    TransportCandidate candidate;
+    candidate.theta = theta_candidate;
+    candidate.logp = proposal_logp;
+    candidate.log_weight = r;
+    candidate.logp_gain = proposal_logp - current_logp;
+    candidate.jump_bonus = 0.0;
+    candidate.diag_jump = jump;
+    return candidate;
+  }
+
+  TransportCandidate make_sas_transport_candidate_(
+      const Eigen::VectorXd& rho_in,
+      const Eigen::VectorXd& theta_before,
+      double current_logp) {
     const Eigen::VectorXd rho = normalized_direction_(rho_in);
     Eigen::VectorXd eta = fit_sas(rho);
     auto [mu, sigma, eps] = unpack_sas_(eta);
-    const double xi = overrelaxed_sas_proposal_(mu, sigma, eps);
+    const double xi = transport_sas_proposal_(mu, sigma, eps);
     const Eigen::VectorXd theta_candidate = theta_before + xi * rho;
     if (!theta_candidate.allFinite()) {
       return {};
@@ -900,11 +971,27 @@ private:
     return mu + sigma * normal_quantile_(up);
   }
 
+  double transport_normal_proposal_(double mu, double sigma) {
+    sigma = std::max(sigma, opts_.tol);
+    if (opts_.initial_transport_proposal == TransportProposal::Random) {
+      return mu + sigma * std_normal_(rng_);
+    }
+    return overrelaxed_normal_proposal_(mu, sigma);
+  }
+
   double overrelaxed_sas_proposal_(double m, double s, double e) {
     s = std::max(s, opts_.tol);
     const double u = normal_cdf_(sas_to_normal_d1(0.0, m, s, e));
     const double up = overrelaxed_cdf_proposal_(u);
     return sas_transform_d1(normal_quantile_(up), m, s, e);
+  }
+
+  double transport_sas_proposal_(double m, double s, double e) {
+    s = std::max(s, opts_.tol);
+    if (opts_.initial_transport_proposal == TransportProposal::Random) {
+      return sas_transform_d1(std_normal_(rng_), m, s, e);
+    }
+    return overrelaxed_sas_proposal_(m, s, e);
   }
 
   double overrelaxed_cdf_proposal_(double u) {

@@ -9,54 +9,140 @@
 #include <filesystem>
 #include <format>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
-int main() {
+namespace {
 
-  constexpr std::size_t N = 30'000;
-  constexpr std::size_t warmup = 15'000;
+struct RunConfig {
+  std::size_t N = 30'000;
+  std::size_t warmup = 15'000;
+  std::uint64_t seed = 0;
+  std::size_t gradient_history = 3;
+  double projection_probability = 0.5;
+  std::string output = "draws/earnings.h5";
+  klhr::TransportApproximation transport_approximation =
+    klhr::TransportApproximation::Sas;
+  klhr::TransportProposal transport_proposal =
+    klhr::TransportProposal::Overrelaxed;
+};
+
+std::string require_value(int& i, int argc, char** argv) {
+  if (i + 1 >= argc) {
+    throw std::runtime_error(std::format("missing value for {}", argv[i]));
+  }
+  ++i;
+  return argv[i];
+}
+
+klhr::TransportApproximation parse_transport_approximation(
+    const std::string& value) {
+  if (value == "sas") {
+    return klhr::TransportApproximation::Sas;
+  }
+  if (value == "normal") {
+    return klhr::TransportApproximation::Normal;
+  }
+  throw std::runtime_error("transport approximation must be sas or normal");
+}
+
+klhr::TransportProposal parse_transport_proposal(const std::string& value) {
+  if (value == "overrelaxed") {
+    return klhr::TransportProposal::Overrelaxed;
+  }
+  if (value == "random") {
+    return klhr::TransportProposal::Random;
+  }
+  throw std::runtime_error("transport proposal must be overrelaxed or random");
+}
+
+RunConfig parse_args(int argc, char** argv) {
+  RunConfig config;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--output") {
+      config.output = require_value(i, argc, argv);
+    } else if (arg == "--transport-approx") {
+      config.transport_approximation =
+        parse_transport_approximation(require_value(i, argc, argv));
+    } else if (arg == "--transport-proposal") {
+      config.transport_proposal =
+        parse_transport_proposal(require_value(i, argc, argv));
+    } else if (arg == "--seed") {
+      config.seed = std::stoull(require_value(i, argc, argv));
+    } else if (arg == "--n") {
+      config.N = std::stoull(require_value(i, argc, argv));
+    } else if (arg == "--warmup") {
+      config.warmup = std::stoull(require_value(i, argc, argv));
+    } else if (arg == "--gradient-history") {
+      config.gradient_history = std::stoull(require_value(i, argc, argv));
+    } else if (arg == "--projection-probability") {
+      config.projection_probability = std::stod(require_value(i, argc, argv));
+    } else {
+      throw std::runtime_error(std::format("unknown argument {}", arg));
+    }
+  }
+  return config;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+
+  const RunConfig config = parse_args(argc, argv);
   std::string model_name = "earnings";
   std::string model = std::format("./stan/{}_model.so", model_name);
   std::string data = std::format("./stan/{}.json", model_name);
-  klhr::KLHR algo{model, data, {.warmup = warmup}};
+  klhr::KlhrOptions options;
+  options.warmup = config.warmup;
+  options.seed = config.seed;
+  options.initial_transport_gradient_history = config.gradient_history;
+  options.initial_transport_gradient_projection_probability =
+    config.projection_probability;
+  options.initial_transport_approximation = config.transport_approximation;
+  options.initial_transport_proposal = config.transport_proposal;
+  klhr::KLHR algo{model, data, options};
   std::size_t D = algo.dim();
   std::size_t C = algo.diagnostic_candidate_count_;
   WelfordAccumulator w{D};
 
-  Eigen::MatrixXd draws(N, D);
-  Eigen::VectorXd acceptance_rate(N);
-  Eigen::VectorXd log_density(N);
-  Eigen::VectorXd nfev(N);
-  Eigen::VectorXd diagnostic_phase(N);
-  Eigen::VectorXd grad_dot_move(N);
-  Eigen::VectorXd cos_grad_move(N);
-  Eigen::VectorXd beta_slope(N);
-  Eigen::VectorXd diagnostic_logp_gain(N);
-  Eigen::VectorXd jump_bonus(N);
-  Eigen::VectorXd diag_jump(N);
-  Eigen::VectorXd move_norm(N);
-  Eigen::VectorXd grad_norm(N);
-  Eigen::VectorXd selected_candidate(N);
-  Eigen::MatrixXd diagnostic_gradient(N, D);
-  Eigen::MatrixXd diagnostic_move(N, D);
-  Eigen::MatrixXd candidate_log_weight(N, C);
-  Eigen::MatrixXd candidate_probability(N, C);
-  Eigen::MatrixXd candidate_logp_gain(N, C);
-  Eigen::MatrixXd candidate_jump_bonus(N, C);
-  Eigen::MatrixXd candidate_diag_jump(N, C);
-  Eigen::MatrixXd candidate_move_norm(N, C);
-  Eigen::MatrixXd candidate_grad_dot_move(N, C);
-  Eigen::MatrixXd candidate_cos_grad_move(N, C);
-  Eigen::MatrixXd candidate_beta_slope(N, C);
-  Eigen::MatrixXd candidate_delta_beta0(N, C);
-  Eigen::MatrixXd candidate_delta_beta1(N, C);
+  Eigen::MatrixXd draws(config.N, D);
+  Eigen::VectorXd acceptance_rate(config.N);
+  Eigen::VectorXd log_density(config.N);
+  Eigen::VectorXd nfev(config.N);
+  Eigen::VectorXd diagnostic_phase(config.N);
+  Eigen::VectorXd grad_dot_move(config.N);
+  Eigen::VectorXd cos_grad_move(config.N);
+  Eigen::VectorXd beta_slope(config.N);
+  Eigen::VectorXd diagnostic_logp_gain(config.N);
+  Eigen::VectorXd jump_bonus(config.N);
+  Eigen::VectorXd diag_jump(config.N);
+  Eigen::VectorXd move_norm(config.N);
+  Eigen::VectorXd grad_norm(config.N);
+  Eigen::VectorXd selected_candidate(config.N);
+  Eigen::MatrixXd diagnostic_gradient(config.N, D);
+  Eigen::MatrixXd diagnostic_move(config.N, D);
+  Eigen::MatrixXd candidate_log_weight(config.N, C);
+  Eigen::MatrixXd candidate_probability(config.N, C);
+  Eigen::MatrixXd candidate_logp_gain(config.N, C);
+  Eigen::MatrixXd candidate_jump_bonus(config.N, C);
+  Eigen::MatrixXd candidate_diag_jump(config.N, C);
+  Eigen::MatrixXd candidate_move_norm(config.N, C);
+  Eigen::MatrixXd candidate_grad_dot_move(config.N, C);
+  Eigen::MatrixXd candidate_cos_grad_move(config.N, C);
+  Eigen::MatrixXd candidate_beta_slope(config.N, C);
+  Eigen::MatrixXd candidate_delta_beta0(config.N, C);
+  Eigen::MatrixXd candidate_delta_beta1(config.N, C);
 
-  std::filesystem::create_directories("draws");
-  HighFive::File h5("draws/earnings.h5", HighFive::File::Truncate);
+  const std::filesystem::path output_path{config.output};
+  if (output_path.has_parent_path()) {
+    std::filesystem::create_directories(output_path.parent_path());
+  }
+  HighFive::File h5(config.output, HighFive::File::Truncate);
 
   Eigen::VectorXd draw(D);
-  for (std::size_t n = 0; n < N; ++n) {
+  for (std::size_t n = 0; n < config.N; ++n) {
     draw = algo.draw();
     draws.row(n) = draw;
     acceptance_rate(n) = algo.acceptance_rate_;
@@ -96,7 +182,7 @@ int main() {
       algo.diagnostic_candidate_delta_beta0_.transpose();
     candidate_delta_beta1.row(n) =
       algo.diagnostic_candidate_delta_beta1_.transpose();
-    if (n >= warmup) {
+    if (n >= config.warmup) {
       w.update(draw);
     }
   }
@@ -151,6 +237,7 @@ int main() {
   std::cout << "stds: " << w.std().transpose() << '\n';
   std::cout << "Number log_density evals: " << algo.nfev_ << '\n';
   std::cout << "Acceptance rate: " << algo.acceptance_rate_ << '\n';
+  std::cout << "Output: " << config.output << '\n';
 
   return 0;
 }
