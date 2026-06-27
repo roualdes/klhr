@@ -20,8 +20,8 @@ def summarize(path, warmup, beta0_threshold, beta1_threshold):
         draws = np.asarray(root["draws"])
         log_density = np.asarray(root["log_density"]).reshape(-1)
         phase = np.asarray(root["diagnostics/phase"]).reshape(-1).astype(int)
-        selected = np.asarray(root["diagnostics/selected_candidate"]).reshape(-1)
         diag_jump = np.asarray(root["diagnostics/diag_jump"]).reshape(-1)
+        move_norm = np.asarray(root["diagnostics/move_norm"]).reshape(-1)
         stop = int(np.asarray(root["stop_transport_idx"]))
 
     transport = phase == 0
@@ -29,7 +29,7 @@ def summarize(path, warmup, beta0_threshold, beta1_threshold):
         tdraws = draws[transport]
         tlogp = log_density[transport]
         tjump = diag_jump[transport]
-        accepted_transport = int(np.sum(selected[transport] == 1))
+        accepted_transport = int(np.sum(move_norm[transport] > 1e-12))
         transport_endpoint = tdraws[-1]
         transport_logp_gain = tlogp[-1] - tlogp[0]
         max_abs_transport = np.max(np.abs(tdraws), axis=0)

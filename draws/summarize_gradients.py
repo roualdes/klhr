@@ -49,18 +49,6 @@ def load_h5(path, group):
             "diag_jump": as_1d(diag["diag_jump"]),
             "move_norm": as_1d(diag["move_norm"]),
             "move": np.asarray(diag["move_unconstrained"]),
-            "selected_candidate": as_1d(diag["selected_candidate"]).astype(int),
-        }
-        cand = diag["transport_candidates"]
-        out["candidates"] = {
-            "probability": np.asarray(cand["probability"]),
-            "logp_gain": np.asarray(cand["logp_gain"]),
-            "cos_grad_move": np.asarray(cand["cos_grad_move"]),
-            "beta_slope": np.asarray(cand["beta_slope"]),
-            "delta_beta0": np.asarray(cand["delta_beta0"]),
-            "delta_beta1": np.asarray(cand["delta_beta1"]),
-            "diag_jump": np.asarray(cand["diag_jump"]),
-            "move_norm": np.asarray(cand["move_norm"]),
         }
         return out
 
@@ -84,28 +72,6 @@ def orthogonality_checks(data):
     for phase_id, phase_name in PHASES.items():
         mask = (data["phase"] == phase_id) & moved
         stats_line(f"{phase_name} move cos", data["cos_grad_move"][mask])
-
-    cand = data["candidates"]
-    transport = data["phase"] == 0
-    proposal_cols = np.arange(1, cand["cos_grad_move"].shape[1])
-    all_candidate_cos = cand["cos_grad_move"][transport][:, proposal_cols].ravel()
-
-    selected_rows = []
-    selected_cols = []
-    for i in np.flatnonzero(transport):
-        col = int(data["selected_candidate"][i])
-        if 0 <= col < cand["cos_grad_move"].shape[1]:
-            selected_rows.append(i)
-            selected_cols.append(col)
-    selected_rows = np.asarray(selected_rows, dtype=int)
-    selected_cols = np.asarray(selected_cols, dtype=int)
-    selected_cos = cand["cos_grad_move"][selected_rows, selected_cols]
-
-    stats_line("all transport candidate cos", all_candidate_cos)
-    stats_line("selected candidate cos", selected_cos)
-    if finite(all_candidate_cos).size and finite(selected_cos).size:
-        tilt = np.mean(finite(selected_cos)) - np.mean(finite(all_candidate_cos))
-        print(f"  selection cosine tilt        {tilt: .4g}")
 
 
 def ridge_checks(data, beta0_threshold, beta1_threshold, window):
@@ -173,65 +139,35 @@ def top_rows_by_abs(values, n):
     return np.argsort(-np.abs(values))[:n]
 
 
-def transport_candidate_beta_checks(data, n):
-    cand = data["candidates"]
-    transport_idx = np.flatnonzero(data["phase"] == 0)
-    proposal_cols = np.arange(1, cand["delta_beta0"].shape[1])
-    if transport_idx.size == 0 or proposal_cols.size == 0:
-        print("\n4. Transport Candidate Beta Checks")
-        print("  no transport candidate proposals")
+def transport_move_beta_checks(data, n):
+    transport_idx = np.flatnonzero(
+        (data["phase"] == 0) & (data["move_norm"] > 1e-12)
+    )
+    print("\n4. Transport Move Beta Checks")
+    if transport_idx.size == 0:
+        print("  no accepted transport moves")
         return
 
-    transport_delta_beta0 = cand["delta_beta0"][transport_idx][:, proposal_cols]
-    flat_order = top_rows_by_abs(transport_delta_beta0.ravel(), n)
+    moves = data["move"][transport_idx]
+    stats_line("accepted |d_beta0|", np.abs(moves[:, 0]))
+    stats_line("accepted |d_beta1|", np.abs(moves[:, 1]))
+    stats_line("accepted diag jump", data["diag_jump"][transport_idx])
 
-    print("\n4. Transport Candidate Beta Checks")
-    stats_line(
-        "all candidate |d_beta0|",
-        np.abs(cand["delta_beta0"][transport_idx][:, proposal_cols]).ravel(),
-    )
-    stats_line(
-        "all candidate |d_beta1|",
-        np.abs(cand["delta_beta1"][transport_idx][:, proposal_cols]).ravel(),
-    )
-
-    selected_rows = []
-    selected_cols = []
-    for i in transport_idx:
-        col = int(data["selected_candidate"][i])
-        if col > 0 and col < cand["delta_beta0"].shape[1]:
-            selected_rows.append(i)
-            selected_cols.append(col)
-    selected_rows = np.asarray(selected_rows, dtype=int)
-    selected_cols = np.asarray(selected_cols, dtype=int)
-    if selected_rows.size > 0:
-        stats_line(
-            "selected |d_beta0|",
-            np.abs(cand["delta_beta0"][selected_rows, selected_cols]),
-        )
-        stats_line(
-            "selected |d_beta1|",
-            np.abs(cand["delta_beta1"][selected_rows, selected_cols]),
-        )
-
-    print("\n  largest candidate beta0 moves")
+    print("\n  largest accepted transport beta0 moves")
     print(
-        "  iter cand    d_beta0    d_beta1   beta_slope   "
-        "cos_grad    logp_gain      prob"
+        "  iter    d_beta0    d_beta1   beta_slope   "
+        "cos_grad    logp_gain  diag_jump"
     )
-    n_cols = proposal_cols.size
-    for flat in flat_order:
-        row = flat // n_cols
-        col = proposal_cols[flat % n_cols]
+    for row in top_rows_by_abs(moves[:, 0], n):
         i = transport_idx[row]
         print(
-            f"  {i:5d} {col:4d} "
-            f"{cand['delta_beta0'][i, col]: 10.4g} "
-            f"{cand['delta_beta1'][i, col]: 10.4g} "
-            f"{cand['beta_slope'][i, col]: 11.4g} "
-            f"{cand['cos_grad_move'][i, col]: 10.4g} "
-            f"{cand['logp_gain'][i, col]: 11.4g} "
-            f"{cand['probability'][i, col]: 9.4g}"
+            f"  {i:5d} "
+            f"{moves[row, 0]: 10.4g} "
+            f"{moves[row, 1]: 10.4g} "
+            f"{data['beta_slope'][i]: 11.4g} "
+            f"{data['cos_grad_move'][i]: 10.4g} "
+            f"{data['logp_gain'][i]: 11.4g} "
+            f"{data['diag_jump'][i]: 9.4g}"
         )
 
 
@@ -254,12 +190,12 @@ def main():
     orthogonality_checks(data)
     ridge_checks(data, args.beta0_threshold, args.beta1_threshold, args.window)
     transport_endpoint_checks(data)
-    transport_candidate_beta_checks(data, args.top)
+    transport_move_beta_checks(data, args.top)
 
     print("\nReading Guide")
-    print("  Candidate and selected cosines should stay near zero.")
-    print("  If ridge discovery is still late, inspect whether transport candidates")
-    print("  ever propose large beta0/beta1 moves and whether those moves get nontrivial probability.")
+    print("  Accepted transport move cosines should stay near zero.")
+    print("  If ridge discovery is still late, inspect whether transport moves")
+    print("  produce beta0/beta1 displacement without destabilizing other parameters.")
 
 
 if __name__ == "__main__":
