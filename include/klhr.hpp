@@ -50,14 +50,15 @@ struct KlhrOptions {
   std::size_t windowscale = 2;
   std::size_t J = 2;
   double l = 0.0;
-  std::size_t initial_fast_adaptation_steps = 100; // 100
+  std::size_t initial_fast_adaptation_steps = 1000; // 100
   std::size_t initial_transport_gradient_history = 3;
   double initial_transport_gradient_projection_probability = 0.5;
   double initial_transport_gradient_floor = 1e-8;
+  double initial_transport_direction_kappa = 10.0;
   TransportApproximation initial_transport_approximation =
     TransportApproximation::Sas;
   TransportProposal initial_transport_proposal =
-    TransportProposal::Overrelaxed;
+    TransportProposal::Random;
 };
 
 class KLHR {
@@ -164,12 +165,17 @@ public:
   }
 
   Eigen::VectorXd fit(const Eigen::VectorXd& rho) {
+    return fit_at_(theta_, rho);
+  }
+
+  Eigen::VectorXd fit_at_(const Eigen::VectorXd& center,
+                          const Eigen::VectorXd& rho) {
     Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1);
     Eigen::VectorXd grad = Eigen::VectorXd::Zero(dim());
     auto fg = [&, this](const Eigen::VectorXd& x,
                         double& value, Eigen::VectorXd& g) {
       g.resize(1);
-      bsm_.log_density_gradient_noe(x(0) * rho + theta_, value, grad);
+      bsm_.log_density_gradient_noe(x(0) * rho + center, value, grad);
       value = -value;
       g(0) = -grad.dot(rho);
     };
@@ -188,7 +194,7 @@ public:
 
     auto kl = [&, this](const Eigen::VectorXd& eta,
                         double& value, Eigen::VectorXd& grad) {
-      min_kl(eta, rho, value, grad);
+      min_kl_at_(eta, center, rho, value, grad);
     };
     bfgs::BfgsResult o = bfgs::bfgs(kl, init, {.gtol = opts_.gtol, .maxiter_bfgs = 4});
     nfev_ += o.nfev * opts_.N;
@@ -197,6 +203,14 @@ public:
 
   void min_kl(const Eigen::VectorXd& eta, const Eigen::VectorXd& rho,
           double& value, Eigen::VectorXd& grad) {
+    min_kl_at_(eta, theta_, rho, value, grad);
+  }
+
+  void min_kl_at_(const Eigen::VectorXd& eta,
+                  const Eigen::VectorXd& center,
+                  const Eigen::VectorXd& rho,
+                  double& value,
+                  Eigen::VectorXd& grad) {
     auto [mu, sigma] = unpack_(eta);
     value = 0.0;
     grad = Eigen::VectorXd::Zero(2);
@@ -215,7 +229,7 @@ public:
 
     for (auto&& [xn, wn]: xw) {
       y = sigma * xn + mu;
-      xi = y * rho + theta_;
+      xi = y * rho + center;
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
       value += wn * logp;
@@ -230,12 +244,17 @@ public:
   }
 
   Eigen::VectorXd fit_sas(const Eigen::VectorXd& rho) {
+    return fit_sas_at_(theta_, rho);
+  }
+
+  Eigen::VectorXd fit_sas_at_(const Eigen::VectorXd& center,
+                              const Eigen::VectorXd& rho) {
     Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1);
     Eigen::VectorXd target_grad = Eigen::VectorXd::Zero(dim());
     auto fg = [&, this](const Eigen::VectorXd& x,
                         double& value, Eigen::VectorXd& g) {
       g.resize(1);
-      bsm_.log_density_gradient_noe(x(0) * rho + theta_, value, target_grad);
+      bsm_.log_density_gradient_noe(x(0) * rho + center, value, target_grad);
       value = -value;
       g(0) = -target_grad.dot(rho);
     };
@@ -254,7 +273,7 @@ public:
 
     auto kl = [&, this](const Eigen::VectorXd& eta,
                         double& value, Eigen::VectorXd& grad) {
-      min_sas_kl(eta, rho, value, grad);
+      min_sas_kl_at_(eta, center, rho, value, grad);
     };
     bfgs::BfgsResult o = bfgs::bfgs(kl, init, {.gtol = opts_.gtol, .maxiter_bfgs = 4});
     nfev_ += o.nfev * opts_.N;
@@ -263,6 +282,14 @@ public:
 
   void min_sas_kl(const Eigen::VectorXd& eta, const Eigen::VectorXd& rho,
                   double& value, Eigen::VectorXd& grad) {
+    min_sas_kl_at_(eta, theta_, rho, value, grad);
+  }
+
+  void min_sas_kl_at_(const Eigen::VectorXd& eta,
+                      const Eigen::VectorXd& center,
+                      const Eigen::VectorXd& rho,
+                      double& value,
+                      Eigen::VectorXd& grad) {
     auto [m, s, e] = unpack_sas_(eta);
     value = 0.0;
     grad = Eigen::VectorXd::Zero(3);
@@ -282,7 +309,7 @@ public:
       const double th = tanh_clipped_(a);
 
       t = m + s * sh;
-      xi = t * rho + theta_;
+      xi = t * rho + center;
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
       line_grad = grad_logp.dot(rho);
@@ -299,6 +326,22 @@ public:
     return -std::log(sigma) - 0.5 * z * z;
   }
 
+  static double log_sum_exp_2_(double a, double b) {
+    if (!std::isfinite(a)) {
+      return b;
+    }
+    if (!std::isfinite(b)) {
+      return a;
+    }
+    const double m = std::max(a, b);
+    return m + std::log(std::exp(a - m) + std::exp(b - m));
+  }
+
+  double normal_log_radial_density_(double r, double mu, double sigma) {
+    r = std::abs(r);
+    return log_sum_exp_2_(log_q(r, mu, sigma), log_q(-r, mu, sigma));
+  }
+
   static double log_cosh(const double x) {
     const double ax = std::abs(x);
     return ax + std::log1p(std::exp(-2.0 * ax)) - std::log(2.0);
@@ -312,6 +355,12 @@ public:
     return -std::log(s) + log_cosh_clipped_(y)
       - 0.5 * sh * sh
       - 0.5 * std::log1p(z * z);
+  }
+
+  double sas_log_radial_density_(double r, double m, double s, double e) {
+    r = std::abs(r);
+    return log_sum_exp_2_(sas_log_q(r, m, s, e),
+                          sas_log_q(-r, m, s, e));
   }
 
   double sas_transform_d1(double normal_draw, double m, double s, double e) {
@@ -402,6 +451,7 @@ private:
 
   struct TransportCandidate {
     Eigen::VectorXd theta;
+    Eigen::VectorXd gradient;
     double logp = -std::numeric_limits<double>::infinity();
     double log_weight = -std::numeric_limits<double>::infinity();
     double logp_gain = std::numeric_limits<double>::quiet_NaN();
@@ -545,7 +595,7 @@ private:
 
     const Eigen::VectorXd rho = tangent_transport_direction_(grad);
     TransportCandidate proposal =
-      make_transport_klhr_candidate_(rho, theta_before, current_logp);
+      make_transport_klhr_candidate_(rho, theta_before, current_logp, grad);
     TransportCandidate stay;
     stay.theta = theta_before;
     stay.logp = current_logp;
@@ -569,7 +619,6 @@ private:
     if (accepted && proposal.theta.allFinite() && std::isfinite(proposal.logp)) {
       theta_ = proposal.theta;
       log_density_ = proposal.logp;
-      update_transport_gradient_history_();
     }
     record_move_diagnostics_(0, grad, theta_before, theta_, current_logp,
                              log_density_, candidates[chosen].jump_bonus,
@@ -589,24 +638,26 @@ private:
 
   Eigen::VectorXd tangent_transport_direction_(const Eigen::VectorXd& grad) {
     const Eigen::Index D = static_cast<Eigen::Index>(dim());
-    for (std::size_t attempt = 0; attempt < 4; ++attempt) {
-      Eigen::VectorXd rho = normal_(D);
-      rho = project_from_transport_avoidance_span_(rho, grad);
-      const double norm = rho.norm();
-      if (std::isfinite(norm) && norm > opts_.tol) {
-        return rho / norm;
+    const double kappa = std::max(0.0, opts_.initial_transport_direction_kappa);
+    if (kappa <= 0.0 || !has_usable_gradient_(grad)) {
+      return normalized_direction_(normal_(D));
+    }
+
+    for (std::size_t attempt = 0; attempt < 10'000; ++attempt) {
+      Eigen::VectorXd rho = normalized_direction_(normal_(D));
+      const double log_accept = transport_direction_log_density_(rho, grad);
+      if (std::log(std_uniform_(rng_)) <= log_accept) {
+        return rho;
       }
     }
 
-    for (Eigen::Index d = 0; d < D; ++d) {
-      Eigen::VectorXd rho = Eigen::VectorXd::Unit(D, d);
-      rho = project_from_transport_avoidance_span_(rho, grad);
-      const double norm = rho.norm();
-      if (std::isfinite(norm) && norm > opts_.tol) {
-        return rho / norm;
-      }
+    Eigen::VectorXd rho = normalized_direction_(normal_(D));
+    const Eigen::VectorXd normal = grad / grad.norm();
+    rho.noalias() -= normal.dot(rho) * normal;
+    const double norm = rho.norm();
+    if (std::isfinite(norm) && norm > opts_.tol) {
+      return rho / norm;
     }
-
     return normalized_direction_(normal_(D));
   }
 
@@ -661,6 +712,25 @@ private:
     return tangent;
   }
 
+  bool has_usable_gradient_(const Eigen::VectorXd& grad) const {
+    const double floor = std::max(opts_.initial_transport_gradient_floor,
+                                  opts_.tol);
+    const double norm = grad.norm();
+    return grad.size() > 0 && std::isfinite(norm) && norm > floor;
+  }
+
+  double transport_direction_log_density_(const Eigen::VectorXd& rho_in,
+                                          const Eigen::VectorXd& grad) const {
+    const double kappa = std::max(0.0, opts_.initial_transport_direction_kappa);
+    if (kappa <= 0.0 || !has_usable_gradient_(grad)) {
+      return 0.0;
+    }
+    const Eigen::VectorXd rho = normalized_direction_const_(rho_in);
+    const Eigen::VectorXd normal = grad / grad.norm();
+    const double cosine = normal.dot(rho);
+    return -kappa * cosine * cosine;
+  }
+
   void update_transport_gradient_history_() {
     if (opts_.initial_transport_gradient_history == 0) {
       return;
@@ -698,42 +768,68 @@ private:
   TransportCandidate make_transport_klhr_candidate_(
       const Eigen::VectorXd& rho_in,
       const Eigen::VectorXd& theta_before,
-      double current_logp) {
+      double current_logp,
+      const Eigen::VectorXd& current_grad) {
     if (opts_.initial_transport_approximation ==
         TransportApproximation::Normal) {
       return make_normal_transport_candidate_(rho_in, theta_before,
-                                              current_logp);
+                                              current_logp, current_grad);
     }
-    return make_sas_transport_candidate_(rho_in, theta_before, current_logp);
+    return make_sas_transport_candidate_(rho_in, theta_before, current_logp,
+                                         current_grad);
   }
 
   TransportCandidate make_normal_transport_candidate_(
       const Eigen::VectorXd& rho_in,
       const Eigen::VectorXd& theta_before,
-      double current_logp) {
-    const Eigen::VectorXd rho = normalized_direction_(rho_in);
-    Eigen::VectorXd eta = fit(rho);
+      double current_logp,
+      const Eigen::VectorXd& current_grad) {
+    Eigen::VectorXd rho = normalized_direction_(rho_in);
+    Eigen::VectorXd eta = fit_at_(theta_before, rho);
     auto [mu, sigma] = unpack_(eta);
-    const double xi = transport_normal_proposal_(mu, sigma);
+    double xi = transport_normal_proposal_(mu, sigma);
+    if (xi < 0.0) {
+      xi = -xi;
+      rho = -rho;
+    }
     const Eigen::VectorXd theta_candidate = theta_before + xi * rho;
     if (!theta_candidate.allFinite()) {
       return {};
     }
 
-    const double proposal_logp = bsm_.log_density_noe(theta_candidate);
+    Eigen::VectorXd proposal_grad(dim());
+    double proposal_logp = -std::numeric_limits<double>::infinity();
+    bsm_.log_density_gradient_noe(theta_candidate, proposal_logp,
+                                  proposal_grad);
     ++nfev_;
     if (!std::isfinite(proposal_logp)) {
       return {};
     }
+    sanitize_gradient_(proposal_grad);
+
+    const Eigen::VectorXd reverse_rho = -rho;
+    Eigen::VectorXd reverse_eta = fit_at_(theta_candidate, reverse_rho);
+    auto [reverse_mu, reverse_sigma] = unpack_(reverse_eta);
+
+    const double forward_line =
+      normal_log_radial_density_(xi, mu, sigma);
+    const double reverse_line =
+      normal_log_radial_density_(xi, reverse_mu, reverse_sigma);
+    if (!std::isfinite(forward_line) || !std::isfinite(reverse_line)) {
+      return {};
+    }
 
     double r = proposal_logp - current_logp;
-    r += log_q(0.0, mu, sigma);
-    r -= log_q(xi, mu, sigma);
+    r += transport_direction_log_density_(reverse_rho, proposal_grad);
+    r -= transport_direction_log_density_(rho, current_grad);
+    r += reverse_line;
+    r -= forward_line;
     const double jump = diag_scaled_distance_(theta_candidate - theta_before,
                                               theta_before);
 
     TransportCandidate candidate;
     candidate.theta = theta_candidate;
+    candidate.gradient = proposal_grad;
     candidate.logp = proposal_logp;
     candidate.log_weight = r;
     candidate.logp_gain = proposal_logp - current_logp;
@@ -745,30 +841,54 @@ private:
   TransportCandidate make_sas_transport_candidate_(
       const Eigen::VectorXd& rho_in,
       const Eigen::VectorXd& theta_before,
-      double current_logp) {
-    const Eigen::VectorXd rho = normalized_direction_(rho_in);
-    Eigen::VectorXd eta = fit_sas(rho);
+      double current_logp,
+      const Eigen::VectorXd& current_grad) {
+    Eigen::VectorXd rho = normalized_direction_(rho_in);
+    Eigen::VectorXd eta = fit_sas_at_(theta_before, rho);
     auto [mu, sigma, eps] = unpack_sas_(eta);
-    const double xi = transport_sas_proposal_(mu, sigma, eps);
+    double xi = transport_sas_proposal_(mu, sigma, eps);
+    if (xi < 0.0) {
+      xi = -xi;
+      rho = -rho;
+    }
     const Eigen::VectorXd theta_candidate = theta_before + xi * rho;
     if (!theta_candidate.allFinite()) {
       return {};
     }
 
-    const double proposal_logp = bsm_.log_density_noe(theta_candidate);
+    Eigen::VectorXd proposal_grad(dim());
+    double proposal_logp = -std::numeric_limits<double>::infinity();
+    bsm_.log_density_gradient_noe(theta_candidate, proposal_logp,
+                                  proposal_grad);
     ++nfev_;
     if (!std::isfinite(proposal_logp)) {
       return {};
     }
+    sanitize_gradient_(proposal_grad);
+
+    const Eigen::VectorXd reverse_rho = -rho;
+    Eigen::VectorXd reverse_eta = fit_sas_at_(theta_candidate, reverse_rho);
+    auto [reverse_mu, reverse_sigma, reverse_eps] = unpack_sas_(reverse_eta);
+
+    const double forward_line =
+      sas_log_radial_density_(xi, mu, sigma, eps);
+    const double reverse_line =
+      sas_log_radial_density_(xi, reverse_mu, reverse_sigma, reverse_eps);
+    if (!std::isfinite(forward_line) || !std::isfinite(reverse_line)) {
+      return {};
+    }
 
     double r = proposal_logp - current_logp;
-    r += sas_log_q(0.0, mu, sigma, eps);
-    r -= sas_log_q(xi, mu, sigma, eps);
+    r += transport_direction_log_density_(reverse_rho, proposal_grad);
+    r -= transport_direction_log_density_(rho, current_grad);
+    r += reverse_line;
+    r -= forward_line;
     const double jump = diag_scaled_distance_(theta_candidate - theta_before,
                                               theta_before);
 
     TransportCandidate candidate;
     candidate.theta = theta_candidate;
+    candidate.gradient = proposal_grad;
     candidate.logp = proposal_logp;
     candidate.log_weight = r;
     candidate.logp_gain = proposal_logp - current_logp;
@@ -933,6 +1053,20 @@ private:
     if (!std::isfinite(norm) || norm <= opts_.tol) {
       rho = Eigen::VectorXd::Unit(static_cast<Eigen::Index>(dim()), 0);
       norm = 1.0;
+    }
+    return rho / norm;
+  }
+
+  Eigen::VectorXd normalized_direction_const_(
+      const Eigen::VectorXd& direction) const {
+    Eigen::VectorXd rho = direction;
+    double norm = rho.norm();
+    if (!std::isfinite(norm) || norm <= opts_.tol) {
+      rho = Eigen::VectorXd::Zero(direction.size());
+      if (rho.size() > 0) {
+        rho(0) = 1.0;
+      }
+      return rho;
     }
     return rho / norm;
   }

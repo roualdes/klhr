@@ -21,11 +21,12 @@ struct RunConfig {
   std::uint64_t seed = 0;
   std::size_t gradient_history = 3;
   double projection_probability = 0.5;
+  double transport_kappa = 5.0;
   std::string output = "draws/earnings.h5";
   klhr::TransportApproximation transport_approximation =
     klhr::TransportApproximation::Sas;
   klhr::TransportProposal transport_proposal =
-    klhr::TransportProposal::Overrelaxed;
+    klhr::TransportProposal::Random;
 };
 
 std::string require_value(int& i, int argc, char** argv) {
@@ -79,6 +80,8 @@ RunConfig parse_args(int argc, char** argv) {
       config.gradient_history = std::stoull(require_value(i, argc, argv));
     } else if (arg == "--projection-probability") {
       config.projection_probability = std::stod(require_value(i, argc, argv));
+    } else if (arg == "--transport-kappa") {
+      config.transport_kappa = std::stod(require_value(i, argc, argv));
     } else {
       throw std::runtime_error(std::format("unknown argument {}", arg));
     }
@@ -100,6 +103,7 @@ int main(int argc, char** argv) {
   options.initial_transport_gradient_history = config.gradient_history;
   options.initial_transport_gradient_projection_probability =
     config.projection_probability;
+  options.initial_transport_direction_kappa = config.transport_kappa;
   options.initial_transport_approximation = config.transport_approximation;
   options.initial_transport_proposal = config.transport_proposal;
   klhr::KLHR algo{model, data, options};
