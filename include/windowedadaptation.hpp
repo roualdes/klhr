@@ -19,6 +19,10 @@ public:
   }
 
   bool window_closed(std::size_t draw) {
+    if (warmup_ < windowsize_) {
+      return false;
+    }
+
     if (closures_.empty() || idx_ >= closures_.size()) {
       return false;
     }

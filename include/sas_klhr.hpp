@@ -2,6 +2,7 @@
 
 #include "base_klhr.hpp"
 #include "bfgs.hpp"
+#include "normal_quantile.hpp"
 
 #include <tuple>
 
@@ -27,7 +28,7 @@ public:
   }
 
   Eigen::VectorXd sinh_KL_step(const Eigen::VectorXd& rho) {
-    return regular_kl_step_(rho, nullptr);
+    return regular_kl_step_(rho);
   }
 
 protected:
@@ -41,23 +42,11 @@ protected:
     return overrelaxed_sas_proposal_(m, s, e);
   }
 
-  double transport_line_proposal_(const Eigen::VectorXd& eta) override {
-    auto [m, s, e] = unpack_sas_(eta);
-    return transport_sas_proposal_(m, s, e);
-  }
-
   double log_line_transition_density_(double from,
                                       double to,
                                       const Eigen::VectorXd& eta) override {
     auto [m, s, e] = unpack_sas_(eta);
     return sas_log_transition_density_(from, to, m, s, e);
-  }
-
-  double log_transport_radial_density_(
-      double r,
-      const Eigen::VectorXd& eta) override {
-    auto [m, s, e] = unpack_sas_(eta);
-    return sas_transport_log_radial_density_(r, m, s, e);
   }
 
   double reference_scale_(const Eigen::VectorXd& eta) override {
@@ -84,7 +73,7 @@ protected:
     double log_s = 0.0;
     const double h = mode.hess_inv(0, 0);
     if (std::isfinite(h) && h > 0.0) {
-      log_s = 0.5 * std::log(h) + std::log(1.25);
+      log_s = 0.5 * std::log(h * 1.1);
     }
 
     Eigen::VectorXd init(3);
@@ -95,7 +84,9 @@ protected:
       min_sas_kl_at_(eta, center, rho, value, grad);
     };
     bfgs::BfgsResult o =
-      bfgs::bfgs(kl, init, {.gtol = opts_.gtol, .maxiter_bfgs = 4});
+      bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
+                            .xrtol = opts_.gtol,
+                            .maxiter_bfgs = 3});
     nfev_ += o.nfev * opts_.N;
     return o.x;
   }
@@ -146,24 +137,6 @@ protected:
       - 0.5 * std::log1p(z * z);
   }
 
-  double sas_log_radial_density_(double r, double m, double s, double e) {
-    r = std::abs(r);
-    return log_sum_exp_2_(sas_log_q(r, m, s, e),
-                          sas_log_q(-r, m, s, e));
-  }
-
-  double sas_transport_log_radial_density_(double r,
-                                           double m,
-                                           double s,
-                                           double e) {
-    r = std::abs(r);
-    if (opts_.initial_transport_proposal == TransportProposal::Random) {
-      return sas_log_radial_density_(r, m, s, e);
-    }
-    return log_sum_exp_2_(sas_log_transition_density_(0.0, r, m, s, e),
-                          sas_log_transition_density_(0.0, -r, m, s, e));
-  }
-
   double sas_log_transition_density_(double from,
                                      double to,
                                      double m,
@@ -183,15 +156,7 @@ protected:
     s = std::max(s, opts_.tol);
     const double u = normal_cdf_(sas_to_normal_d1(0.0, m, s, e));
     const double up = overrelaxed_cdf_proposal_(u);
-    return sas_transform_d1(normal_quantile_(up), m, s, e);
-  }
-
-  double transport_sas_proposal_(double m, double s, double e) {
-    s = std::max(s, opts_.tol);
-    if (opts_.initial_transport_proposal == TransportProposal::Random) {
-      return sas_transform_d1(std_normal_(rng_), m, s, e);
-    }
-    return overrelaxed_sas_proposal_(m, s, e);
+    return sas_transform_d1(normal_quantile_(clamp_probability_(up)), m, s, e);
   }
 
   double sas_transform_d1(double normal_draw, double m, double s, double e) {

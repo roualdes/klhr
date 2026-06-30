@@ -2,6 +2,7 @@
 
 #include "base_klhr.hpp"
 #include "bfgs.hpp"
+#include "normal_quantile.hpp"
 
 #include <utility>
 
@@ -27,7 +28,7 @@ public:
   }
 
   Eigen::VectorXd normal_KL_step(const Eigen::VectorXd& rho) {
-    return regular_kl_step_(rho, nullptr);
+    return regular_kl_step_(rho);
   }
 
 protected:
@@ -41,23 +42,11 @@ protected:
     return overrelaxed_normal_proposal_(mu, sigma);
   }
 
-  double transport_line_proposal_(const Eigen::VectorXd& eta) override {
-    auto [mu, sigma] = unpack_(eta);
-    return transport_normal_proposal_(mu, sigma);
-  }
-
   double log_line_transition_density_(double from,
                                       double to,
                                       const Eigen::VectorXd& eta) override {
     auto [mu, sigma] = unpack_(eta);
     return normal_log_transition_density_(from, to, mu, sigma);
-  }
-
-  double log_transport_radial_density_(
-      double r,
-      const Eigen::VectorXd& eta) override {
-    auto [mu, sigma] = unpack_(eta);
-    return normal_transport_log_radial_density_(r, mu, sigma);
   }
 
   double reference_scale_(const Eigen::VectorXd& eta) override {
@@ -138,22 +127,6 @@ protected:
     return -std::log(sigma) - 0.5 * z * z;
   }
 
-  double normal_log_radial_density_(double r, double mu, double sigma) {
-    r = std::abs(r);
-    return log_sum_exp_2_(log_q(r, mu, sigma), log_q(-r, mu, sigma));
-  }
-
-  double normal_transport_log_radial_density_(double r,
-                                              double mu,
-                                              double sigma) {
-    r = std::abs(r);
-    if (opts_.initial_transport_proposal == TransportProposal::Random) {
-      return normal_log_radial_density_(r, mu, sigma);
-    }
-    return log_sum_exp_2_(normal_log_transition_density_(0.0, r, mu, sigma),
-                          normal_log_transition_density_(0.0, -r, mu, sigma));
-  }
-
   double normal_log_transition_density_(double from,
                                         double to,
                                         double mu,
@@ -172,15 +145,7 @@ protected:
     sigma = std::max(sigma, opts_.tol);
     const double u = normal_cdf_((0.0 - mu) / sigma);
     const double up = overrelaxed_cdf_proposal_(u);
-    return mu + sigma * normal_quantile_(up);
-  }
-
-  double transport_normal_proposal_(double mu, double sigma) {
-    sigma = std::max(sigma, opts_.tol);
-    if (opts_.initial_transport_proposal == TransportProposal::Random) {
-      return mu + sigma * std_normal_(rng_);
-    }
-    return overrelaxed_normal_proposal_(mu, sigma);
+    return mu + sigma * normal_quantile_(clamp_probability_(up));
   }
 
   std::pair<double, double> unpack_(const Eigen::VectorXd& eta) {

@@ -5,7 +5,7 @@ import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 
-def trace_plot(draws, log_density, stop_idx, plot_name):
+def trace_plot(draws, log_density, plot_name):
     plt.clf()
     M = np.shape(draws)[0]
     idx = np.arange(M)
@@ -20,23 +20,18 @@ def trace_plot(draws, log_density, stop_idx, plot_name):
     ax_log_density = fig.add_subplot(gs[2, :])
 
     axs[0, 0].plot(idx, draws[:, 0])
-    axs[0, 0].axvline(x = stop_idx, linestyle = "--")
     axs[0, 0].set_ylabel(r"$\beta_0$")
 
     axs[0, 1].plot(idx, draws[:, 1])
-    axs[0, 1].axvline(x = stop_idx, linestyle = "--")
     axs[0, 1].set_ylabel(r"$\beta_1$")
 
     axs[1, 0].plot(idx, draws[:, 2])
-    axs[1, 0].axvline(x = stop_idx, linestyle = "--")
     axs[1, 0].set_ylabel(r"$\sigma$")
 
     axs[1, 1].plot(idx, draws[:, 3])
-    axs[1, 1].axvline(x = stop_idx, linestyle = "--")
     axs[1, 1].set_ylabel(r"$s$")
 
     ax_log_density.plot(idx, log_density)
-    ax_log_density.axvline(x = stop_idx, linestyle = "--")
     ax_log_density.set_ylabel("log density")
     ax_log_density.set_xlabel("iteration")
 
@@ -67,32 +62,25 @@ def scatter_plot(x, y, plot_name):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--file", default="draws/earnings.h5")
-    parser.add_argument("--prefix", default=None)
-    parser.add_argument("--group", default="earnings")
+    parser.add_argument("--model", default="earnings")
     args = parser.parse_args()
 
-    path = Path(args.file)
-    prefix = Path(args.prefix) if args.prefix else path.with_suffix("")
-    prefix.parent.mkdir(parents=True, exist_ok=True)
-
-    with h5py.File(path, "r") as f:
-        root = f[args.group]
+    with h5py.File("draws/experiments.h5", "r") as f:
+        root = f[args.model]
         draws = np.asarray(root["draws"])
         log_density = np.asarray(root["log_density"])
-        stop_idx = int(np.asarray(root["stop_transport_idx"]))
-        print(f"Stopped transport phase at: {stop_idx}")
-        trace_plot(draws, log_density, stop_idx, f"{prefix}_trace_plots.png")
+        trace_plot(draws, log_density, f"draws/{args.model}_trace_plots.png")
+
 
         ar = np.asarray(root["acceptance_rate"])
-        acceptance_rate_plot(ar, f"{prefix}_acceptance_rate.png")
+        acceptance_rate_plot(ar, f"draws/{args.model}_acceptance_rate.png")
 
         nfev = np.asarray(root["nfev"])
         mdx = np.arange(np.size(nfev)) + 1
         nfev = nfev.flatten() / mdx
-        nfev_plot(nfev, f"{prefix}_nfev.png")
+        nfev_plot(nfev, f"draws/{args.model}_nfev.png")
 
-        scatter_plot(draws[:, 0], draws[:, 1], f"{prefix}_scatter_plot.png")
+        scatter_plot(draws[:, 0], draws[:, 1], f"{args.model}_scatter_plot.png")
 
 
 if __name__ == "__main__":

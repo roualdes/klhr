@@ -59,9 +59,8 @@ public:
       nv.setZero();
     }
 
-    const double n = static_cast<double>(n_);
-    return (n / (n + 5.0)) * nv.array()
-      + 1e-3 * (5.0 / (n + 5.0));
+    // const double n = static_cast<double>(n_);
+    return nv; // (n / (n + 5.0)) * nv.array() + 1e-3 * (5.0 / (n + 5.0));
   }
 
   Eigen::MatrixXd vectors() const {
