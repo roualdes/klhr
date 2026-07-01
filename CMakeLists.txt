@@ -59,9 +59,6 @@ target_include_directories(mcmcpp INTERFACE
     "/Users/edward/bfgs/include"
 )
 
-## openm
-find_package(OpenMP REQUIRED)
-
 ## HDF5
 # HDF5 need be installed and findable
 find_package(HDF5 REQUIRED COMPONENTS C)

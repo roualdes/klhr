@@ -12,7 +12,6 @@ target_link_libraries(example PRIVATE
                               mcmcpp
                               dylib
                               Eigen3::Eigen
-                              OpenMP::OpenMP_CXX
                               ${KLHR_HIGHFIVE_TARGET}
                               ${HDF5_LIBRARIES}
                               CLI11::CLI11

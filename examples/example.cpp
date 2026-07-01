@@ -44,10 +44,10 @@ int main(int argc, char** argv) {
       ->default_val(num_iterations)
       ->check(CLI::NonNegativeNumber);
 
-    app.add_option("model", model_name,
+    app.add_option("--model", model_name,
                    "Path to the Stan model library (.so from BridgeStan)");
 
-    app.add_option("sampler", sampler,
+    app.add_option("--sampler", sampler,
                    "Name of sampling algorithm to use");
 
     CLI11_PARSE(app, argc, argv);

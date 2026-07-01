@@ -11,52 +11,9 @@ namespace klhr {
 class NormalKLHR : public BaseKLHR {
 public:
   using BaseKLHR::BaseKLHR;
-
-  Eigen::VectorXd fit(const Eigen::VectorXd& rho) {
-    return fit_at_(theta_, rho);
-  }
-
-  void min_kl(const Eigen::VectorXd& eta,
-              const Eigen::VectorXd& rho,
-              double& value,
-              Eigen::VectorXd& grad) {
-    min_kl_at_(eta, theta_, rho, value, grad);
-  }
-
-  Eigen::VectorXd normal_KL_step() {
-    return regular_kl_step_();
-  }
-
-  Eigen::VectorXd normal_KL_step(const Eigen::VectorXd& rho) {
-    return regular_kl_step_(rho);
-  }
-
 protected:
-  Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
-                            const Eigen::VectorXd& rho) override {
-    return fit_at_(center, rho);
-  }
-
-  double overrelaxed_line_proposal_(const Eigen::VectorXd& eta) override {
-    auto [mu, sigma] = unpack_(eta);
-    return overrelaxed_normal_proposal_(mu, sigma);
-  }
-
-  double log_line_transition_density_(double from,
-                                      double to,
-                                      const Eigen::VectorXd& eta) override {
-    auto [mu, sigma] = unpack_(eta);
-    return normal_log_transition_density_(from, to, mu, sigma);
-  }
-
-  double reference_scale_(const Eigen::VectorXd& eta) override {
-    auto [mu, sigma] = unpack_(eta);
-    (void)mu;
-    return std::max(sigma, opts_.tol);
-  }
-
-  Eigen::VectorXd fit_at_(const Eigen::VectorXd& center,
-                          const Eigen::VectorXd& rho) {
+    Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
+                          const Eigen::VectorXd& rho) override {
     Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1);
     Eigen::VectorXd grad = Eigen::VectorXd::Zero(dim());
     auto fg = [&, this](const Eigen::VectorXd& x,
@@ -73,7 +30,7 @@ protected:
     double log_s = 0.0;
     const double h = mode.hess_inv(0, 0);
     if (std::isfinite(h) && h > 0.0) {
-      log_s = 0.5 * std::log(h) + std::log(1.25);
+      log_s = 0.5 * std::log(h * 1.1);
     }
 
     Eigen::VectorXd init(2);
@@ -81,19 +38,29 @@ protected:
 
     auto kl = [&, this](const Eigen::VectorXd& eta,
                         double& value, Eigen::VectorXd& grad) {
-      min_kl_at_(eta, center, rho, value, grad);
+      KL_(eta, center, rho, value, grad);
     };
     bfgs::BfgsResult o =
-      bfgs::bfgs(kl, init, {.gtol = opts_.gtol, .maxiter_bfgs = 4});
+      bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
+                            .xrtol = opts_.gtol,
+                            .maxiter_bfgs = 4});
     nfev_ += o.nfev * opts_.N;
     return o.x;
   }
 
-  void min_kl_at_(const Eigen::VectorXd& eta,
-                  const Eigen::VectorXd& center,
-                  const Eigen::VectorXd& rho,
-                  double& value,
-                  Eigen::VectorXd& grad) {
+  double overrelaxed_proposal_(const Eigen::VectorXd& eta) override {
+    auto [mu, sigma] = unpack_(eta);
+    return overrelaxed_normal_proposal_(mu, sigma);
+  }
+
+  double transition_density_(const double from, const double to,
+                             const Eigen::VectorXd& eta) override {
+    auto [mu, sigma] = unpack_(eta);
+    return normal_transition_density_(from, to, mu, sigma);
+  }
+
+  void KL_(const Eigen::VectorXd& eta, const Eigen::VectorXd& center,
+                  const Eigen::VectorXd& rho, double& value, Eigen::VectorXd& grad) {
     auto [mu, sigma] = unpack_(eta);
     value = 0.0;
     grad = Eigen::VectorXd::Zero(2);
@@ -101,10 +68,12 @@ protected:
     double y;
     double logp;
     double w_grad_rho;
-    Eigen::VectorXd xi(dim());
-    Eigen::VectorXd grad_logp(dim());
+    Eigen::Index D = dim();
+    Eigen::VectorXd xi(D);
+    Eigen::VectorXd grad_logp(D);
 
-    for (Eigen::Index n = 0; n < x_.size(); ++n) {
+    // TODO openmp it up, try changing N
+    for (Eigen::Index n = 0; n < opts_.N; ++n) {
       const double xn = x_(n);
       const double wn = w_(n);
       y = sigma * xn + mu;
@@ -122,29 +91,27 @@ protected:
     grad = -grad;
   }
 
-  double log_q(const double x, const double mu, const double sigma) {
+  double log_q_(const double x, const double mu, const double sigma) {
     const double z = (x - mu) / sigma;
     return -std::log(sigma) - 0.5 * z * z;
   }
 
-  double normal_log_transition_density_(double from,
-                                        double to,
-                                        double mu,
-                                        double sigma) {
-    sigma = std::max(sigma, opts_.tol);
-    const double log_density = log_q(to, mu, sigma);
+  double normal_transition_density_(const double from, const double to,
+                                    const double mu, const double sigma) {
+    const double s = std::max(sigma, opts_.tol);
+    const double log_density = log_q_(to, mu, s);
     if (opts_.K == 0) {
       return log_density;
     }
-    const double u_from = normal_cdf_((from - mu) / sigma);
-    const double u_to = normal_cdf_((to - mu) / sigma);
-    return ordered_overrelaxed_cdf_log_density_(u_from, u_to) + log_density;
+    const double u_from = normal_cdf_((from - mu) / s);
+    const double u_to = normal_cdf_((to - mu) / s);
+    return overrelaxed_density_(u_from, u_to) + log_density;
   }
 
-  double overrelaxed_normal_proposal_(double mu, double sigma) {
-    sigma = std::max(sigma, opts_.tol);
-    const double u = normal_cdf_((0.0 - mu) / sigma);
-    const double up = overrelaxed_cdf_proposal_(u);
+  double overrelaxed_normal_proposal_(const double mu, const double sigma) {
+    const double s = std::max(sigma, opts_.tol);
+    const double u = normal_cdf_((0.0 - mu) / s);
+    const double up = overrelaxed_proposal_impl_(u);
     return mu + sigma * normal_quantile_(clamp_probability_(up));
   }
 
