@@ -4,7 +4,10 @@
 #include "bfgs.hpp"
 #include "normal_quantile.hpp"
 
+#include <limits>
+#include <string>
 #include <tuple>
+#include <vector>
 
 #include <iostream>
 
@@ -12,8 +15,45 @@ namespace klhr {
 
 class SASKLHR : public BaseKLHR {
 public:
-  using BaseKLHR::BaseKLHR;
+  static KlhrOptions default_options() {
+    KlhrOptions options;
+    options.initial_transport_steps = 100;
+    return options;
+  }
+
+  SASKLHR(std::string stan_file, std::string json_file,
+          const KlhrOptions& options = default_options()) :
+    BaseKLHR(stan_file, json_file, options) {}
+
+  const std::vector<double>& sas_m_history() const {
+    return sas_m_;
+  }
+
+  const std::vector<double>& sas_xi_history() const {
+    return sas_xi_;
+  }
+
+  const std::vector<double>& sas_accepted_xi_history() const {
+    return sas_accepted_xi_;
+  }
+
+  const std::vector<double>& sas_accepted_history() const {
+    return sas_accepted_;
+  }
+
 protected:
+  void record_kl_step_(const Eigen::VectorXd& eta, const double xi,
+                       const bool accepted) override {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const bool valid_eta = eta.size() >= 3 && eta.allFinite();
+    const bool valid_xi = std::isfinite(xi);
+
+    sas_m_.push_back(valid_eta ? eta(0) : nan);
+    sas_xi_.push_back(valid_xi ? xi : nan);
+    sas_accepted_xi_.push_back(accepted && valid_xi ? xi : nan);
+    sas_accepted_.push_back(accepted ? 1.0 : 0.0);
+  }
+
     Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
                               const Eigen::VectorXd& rho) override {
     Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1);
@@ -264,6 +304,11 @@ protected:
   static constexpr double skew_radius_() {
     return 5.0;
   }
+
+  std::vector<double> sas_m_;
+  std::vector<double> sas_xi_;
+  std::vector<double> sas_accepted_xi_;
+  std::vector<double> sas_accepted_;
 };
 
 } // namespace klhr

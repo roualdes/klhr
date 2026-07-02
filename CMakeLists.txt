@@ -24,6 +24,7 @@ set(SOURCES
   include/hdf5drawwriter.hpp
   include/klhr.hpp
   include/gausshermite.hpp
+  include/gausslaguerre.hpp
   include/welford.hpp
 )
 
