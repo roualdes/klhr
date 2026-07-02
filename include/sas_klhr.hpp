@@ -34,7 +34,7 @@ protected:
     }
 
     Eigen::VectorXd init(3);
-    init << mode.x(0), log_s, 0.0;
+    init << mode.x(0), raw_log_scale_(log_s), 0.0;
 
     auto kl = [&, this](const Eigen::VectorXd& eta,
                         double& value, Eigen::VectorXd& grad) {
@@ -62,6 +62,8 @@ protected:
   void KL_(const Eigen::VectorXd& eta, const Eigen::VectorXd& center,
                       const Eigen::VectorXd& rho, double& value, Eigen::VectorXd& grad) {
     auto [m, s, e] = unpack_sas_(eta);
+    const double log_s = smooth_log_scale_(eta(1));
+    const double dlog_s = smooth_log_scale_derivative_(eta(1));
     value = 0.0;
     grad = Eigen::VectorXd::Zero(3);
 
@@ -86,11 +88,12 @@ protected:
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
       line_grad = grad_logp.dot(rho);
 
-      value += wn * (-eta(1) - log_cosh_clipped_(a) - logp);
+      value += wn * (-log_s - log_cosh_clipped_(a) - logp);
       grad(0) -= wn * line_grad;
       grad(1) += wn * (-1.0 - line_grad * s * sh);
       grad(2) += wn * (-th - line_grad * s * ch);
     }
+    grad(1) *= dlog_s;
   }
 
   double sas_log_q_(const double x, const double m, const double s, const double e) {
@@ -134,8 +137,7 @@ protected:
 
   std::tuple<double, double, double> unpack_sas_(const Eigen::VectorXd& eta) {
     const double m = eta(0);
-    const double c = opts_.scale_clip;
-    const double log_s = std::clamp(eta(1), -c, c);
+    const double log_s = smooth_log_scale_(eta(1));
     const double s = std::exp(log_s) + opts_.tol;
     const double e = eta(2);
     return {m, s, e};
@@ -165,6 +167,42 @@ protected:
 
   double log_cosh_clipped_(const double x) const {
     return log_cosh_(scale_clipped_(x));
+  }
+
+  double smooth_log_scale_(const double raw) const {
+    const double c = opts_.scale_clip;
+    if (!std::isfinite(c) || c <= 0.0) {
+      return raw;
+    }
+    if (!std::isfinite(raw)) {
+      return std::isnan(raw) ? 0.0 : std::copysign(c, raw);
+    }
+    return c * std::tanh(raw / c);
+  }
+
+  double smooth_log_scale_derivative_(const double raw) const {
+    const double c = opts_.scale_clip;
+    if (!std::isfinite(c) || c <= 0.0) {
+      return 1.0;
+    }
+    if (!std::isfinite(raw)) {
+      return 0.0;
+    }
+    const double th = std::tanh(raw / c);
+    return 1.0 - th * th;
+  }
+
+  double raw_log_scale_(const double log_s) const {
+    const double c = opts_.scale_clip;
+    if (!std::isfinite(c) || c <= 0.0) {
+      return log_s;
+    }
+    if (!std::isfinite(log_s)) {
+      return 0.0;
+    }
+    const double eps = std::numeric_limits<double>::epsilon();
+    const double z = std::clamp(log_s / c, -1.0 + eps, 1.0 - eps);
+    return c * std::atanh(z);
   }
 };
 
