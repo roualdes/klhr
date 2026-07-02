@@ -26,7 +26,7 @@ struct KlhrOptions {
   Eigen::Index N = 8;
   double tol = 1e-10;
   double grad_clip = std::numeric_limits<double>::infinity();
-  double scale_clip = 20;
+  double sas_arg_clip = 30;
   double gtol = 1e-3;
   std::size_t K = 16;
   std::size_t warmup = 1'000;

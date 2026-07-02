@@ -27,25 +27,29 @@ protected:
     bfgs::BfgsResult mode = bfgs::bfgs(fg, mode_init);
     nfev_ += mode.nfev;
 
-    double log_s = 0.0;
+    double log_s0 = 0.0;
     const double h = mode.hess_inv(0, 0);
     if (std::isfinite(h) && h > 0.0) {
-      log_s = 0.5 * std::log(h * 1.1);
+      log_s0 = 0.5 * std::log(h * 1.1);
     }
 
     Eigen::VectorXd init(3);
-    init << mode.x(0), raw_log_scale_(log_s), 0.0;
+    init << mode.x(0), 0.0, 0.0;
 
     auto kl = [&, this](const Eigen::VectorXd& eta,
                         double& value, Eigen::VectorXd& grad) {
-      KL_(eta, center, rho, value, grad);
+      KL_(eta, center, rho, log_s0, value, grad);
     };
     bfgs::BfgsResult o =
       bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
                             .xrtol = opts_.gtol,
                             .maxiter_bfgs = 3});
     nfev_ += o.nfev * opts_.N;
-    return o.x;
+    const Eigen::VectorXd raw =
+      o.x.size() == 3 && o.x.allFinite() ? o.x : init;
+    Eigen::VectorXd out(3);
+    out << raw(0), relative_log_scale_(raw(1), log_s0), raw(2);
+    return out;
   }
 
   double overrelaxed_proposal_(const Eigen::VectorXd& eta) override {
@@ -60,10 +64,13 @@ protected:
   }
 
   void KL_(const Eigen::VectorXd& eta, const Eigen::VectorXd& center,
-                      const Eigen::VectorXd& rho, double& value, Eigen::VectorXd& grad) {
-    auto [m, s, e] = unpack_sas_(eta);
-    const double log_s = smooth_log_scale_(eta(1));
-    const double dlog_s = smooth_log_scale_derivative_(eta(1));
+                      const Eigen::VectorXd& rho, const double log_s0,
+                      double& value, Eigen::VectorXd& grad) {
+    const double m = eta(0);
+    const double log_s = relative_log_scale_(eta(1), log_s0);
+    const double dlog_s = relative_log_scale_derivative_(eta(1));
+    const double s = scale_from_log_(log_s);
+    const double e = eta(2);
     value = 0.0;
     grad = Eigen::VectorXd::Zero(3);
 
@@ -137,8 +144,7 @@ protected:
 
   std::tuple<double, double, double> unpack_sas_(const Eigen::VectorXd& eta) {
     const double m = eta(0);
-    const double log_s = smooth_log_scale_(eta(1));
-    const double s = std::exp(log_s) + opts_.tol;
+    const double s = scale_from_log_(eta(1));
     const double e = eta(2);
     return {m, s, e};
   }
@@ -148,61 +154,55 @@ protected:
     return ax + std::log1p(std::exp(-2.0 * ax)) - std::log(2.0);
   }
 
-  double scale_clipped_(const double x) const {
-    const double c = opts_.scale_clip;
+  double sas_arg_clipped_(const double x) const {
+    const double c = opts_.sas_arg_clip;
     return std::clamp(x, -c, c);
   }
 
   double sinh_clipped_(const double x) const {
-    return std::sinh(scale_clipped_(x));
+    return std::sinh(sas_arg_clipped_(x));
   }
 
   double cosh_clipped_(const double x) const {
-    return std::cosh(scale_clipped_(x));
+    return std::cosh(sas_arg_clipped_(x));
   }
 
   double tanh_clipped_(const double x) const {
-    return std::tanh(scale_clipped_(x));
+    return std::tanh(sas_arg_clipped_(x));
   }
 
   double log_cosh_clipped_(const double x) const {
-    return log_cosh_(scale_clipped_(x));
+    return log_cosh_(sas_arg_clipped_(x));
   }
 
-  double smooth_log_scale_(const double raw) const {
-    const double c = opts_.scale_clip;
-    if (!std::isfinite(c) || c <= 0.0) {
-      return raw;
-    }
+  double relative_log_scale_(const double raw, const double log_s0) const {
+    const double r = log_scale_radius_();
     if (!std::isfinite(raw)) {
-      return std::isnan(raw) ? 0.0 : std::copysign(c, raw);
+      return log_s0;
     }
-    return c * std::tanh(raw / c);
+    return log_s0 + r * std::tanh(raw / r);
   }
 
-  double smooth_log_scale_derivative_(const double raw) const {
-    const double c = opts_.scale_clip;
-    if (!std::isfinite(c) || c <= 0.0) {
-      return 1.0;
-    }
+  double relative_log_scale_derivative_(const double raw) const {
+    const double r = log_scale_radius_();
     if (!std::isfinite(raw)) {
       return 0.0;
     }
-    const double th = std::tanh(raw / c);
+    const double th = std::tanh(raw / r);
     return 1.0 - th * th;
   }
 
-  double raw_log_scale_(const double log_s) const {
-    const double c = opts_.scale_clip;
-    if (!std::isfinite(c) || c <= 0.0) {
-      return log_s;
-    }
+  double scale_from_log_(double log_s) const {
     if (!std::isfinite(log_s)) {
-      return 0.0;
+      log_s = 0.0;
     }
-    const double eps = std::numeric_limits<double>::epsilon();
-    const double z = std::clamp(log_s / c, -1.0 + eps, 1.0 - eps);
-    return c * std::atanh(z);
+    const double max_log = std::log(std::numeric_limits<double>::max()) - 2.0;
+    const double min_log = std::log(std::numeric_limits<double>::min()) + 2.0;
+    return std::exp(std::clamp(log_s, min_log, max_log)) + opts_.tol;
+  }
+
+  static constexpr double log_scale_radius_() {
+    return 4.6051701859880918; // log(100)
   }
 };
 
