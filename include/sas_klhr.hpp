@@ -6,6 +6,8 @@
 
 #include <tuple>
 
+#include <iostream>
+
 namespace klhr {
 
 class SASKLHR : public BaseKLHR {
@@ -48,7 +50,7 @@ protected:
     const Eigen::VectorXd raw =
       o.x.size() == 3 && o.x.allFinite() ? o.x : init;
     Eigen::VectorXd out(3);
-    out << raw(0), relative_log_scale_(raw(1), log_s0), raw(2);
+    out << raw(0), relative_log_scale_(raw(1), log_s0), bounded_skew_(raw(2));
     return out;
   }
 
@@ -70,7 +72,14 @@ protected:
     const double log_s = relative_log_scale_(eta(1), log_s0);
     const double dlog_s = relative_log_scale_derivative_(eta(1));
     const double s = scale_from_log_(log_s);
-    const double e = eta(2);
+    const double e = bounded_skew_(eta(2));
+    const double de = bounded_skew_derivative_(eta(2));
+    if (!std::isfinite(m) || !std::isfinite(log_s) ||
+        !std::isfinite(dlog_s) || !std::isfinite(s) ||
+        !std::isfinite(e) || !std::isfinite(de)) {
+      set_bad_kl_(eta, value, grad);
+      return;
+    }
     value = 0.0;
     grad = Eigen::VectorXd::Zero(3);
 
@@ -91,9 +100,25 @@ protected:
 
       t = m + s * sh;
       xi = t * rho + center;
+      if (!std::isfinite(t) || !xi.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
+      if (!std::isfinite(logp) || !grad_logp.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
+      if (!grad_logp.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
       line_grad = grad_logp.dot(rho);
+      if (!std::isfinite(line_grad)) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
 
       value += wn * (-log_s - log_cosh_clipped_(a) - logp);
       grad(0) -= wn * line_grad;
@@ -101,6 +126,7 @@ protected:
       grad(2) += wn * (-th - line_grad * s * ch);
     }
     grad(1) *= dlog_s;
+    grad(2) *= de;
   }
 
   double sas_log_q_(const double x, const double m, const double s, const double e) {
@@ -147,6 +173,19 @@ protected:
     const double s = scale_from_log_(eta(1));
     const double e = eta(2);
     return {m, s, e};
+  }
+
+  void set_bad_kl_(const Eigen::VectorXd& eta, double& value,
+                   Eigen::VectorXd& grad) const {
+    value = bad_kl_value_();
+    grad = Eigen::VectorXd::Zero(eta.size());
+    if (eta.size() > 1 && std::isfinite(eta(1))) {
+      grad(1) = eta(1);
+    }
+  }
+
+  static constexpr double bad_kl_value_() {
+    return 1e100;
   }
 
   static double log_cosh_(const double x) {
@@ -201,8 +240,29 @@ protected:
     return std::exp(std::clamp(log_s, min_log, max_log)) + opts_.tol;
   }
 
+  double bounded_skew_(const double raw) const {
+    const double r = skew_radius_();
+    if (!std::isfinite(raw)) {
+      return 0.0;
+    }
+    return r * std::tanh(raw / r);
+  }
+
+  double bounded_skew_derivative_(const double raw) const {
+    const double r = skew_radius_();
+    if (!std::isfinite(raw)) {
+      return 0.0;
+    }
+    const double th = std::tanh(raw / r);
+    return 1.0 - th * th;
+  }
+
   static constexpr double log_scale_radius_() {
     return 4.6051701859880918; // log(100)
+  }
+
+  static constexpr double skew_radius_() {
+    return 5.0;
   }
 };
 

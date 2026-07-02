@@ -155,20 +155,66 @@ protected:
   std::size_t warmup_;
 
   void regular_kl_step_(const Eigen::VectorXd& rho) {
+    auto update_acceptance = [this](const bool accepted) {
+      const double d = static_cast<double>(accepted) - acceptance_rate_;
+      acceptance_rate_ += d / draw_;
+    };
+
     Eigen::VectorXd eta = fit_line_(theta_, rho);
+    if (!eta.allFinite()) {
+      update_acceptance(false);
+      return;
+    }
+
     const double xi = overrelaxed_proposal_(eta);
+    if (!std::isfinite(xi)) {
+      update_acceptance(false);
+      return;
+    }
+
     Eigen::VectorXd thetap = xi * rho + theta_;
+    if (!thetap.allFinite()) {
+      update_acceptance(false);
+      return;
+    }
+
     double ldp = bsm_.log_density_noe(thetap);
     ++nfev_;
+    if (!std::isfinite(ldp)) {
+      update_acceptance(false);
+      return;
+    }
+
     const double f = transition_density_(0.0, xi, eta);
+    if (!std::isfinite(f)) {
+      update_acceptance(false);
+      return;
+    }
+
     Eigen::VectorXd reta = fit_line_(thetap, rho);
+    if (!reta.allFinite()) {
+      update_acceptance(false);
+      return;
+    }
+
     const double r = transition_density_(0.0, -xi, reta);
+    if (!std::isfinite(r)) {
+      update_acceptance(false);
+      return;
+    }
+
     double a = ldp - log_density_ + r - f;
+    if (!std::isfinite(a)) {
+      update_acceptance(false);
+      return;
+    }
+
     const bool accepted = std::log(std_uniform_(rng_)) < std::min(0.0, a);
-    const double d = accepted - acceptance_rate_;
-    acceptance_rate_ += d / draw_;
-    theta_ = accepted * thetap + (1 - accepted) * theta_;
-    log_density_ = accepted * ldp + (1 - accepted) * log_density_;
+    update_acceptance(accepted);
+    if (accepted) {
+      theta_ = thetap;
+      log_density_ = ldp;
+    }
   }
 
   void adapt_warmup_(const Eigen::VectorXd& theta) {

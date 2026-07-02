@@ -70,6 +70,11 @@ protected:
     const double log_s = relative_log_scale_(eta(1), log_s0);
     const double dlog_s = relative_log_scale_derivative_(eta(1));
     const double sigma = scale_from_log_(log_s);
+    if (!std::isfinite(mu) || !std::isfinite(log_s) ||
+        !std::isfinite(dlog_s) || !std::isfinite(sigma)) {
+      set_bad_kl_(eta, value, grad);
+      return;
+    }
     value = 0.0;
     grad = Eigen::VectorXd::Zero(2);
 
@@ -86,10 +91,26 @@ protected:
       const double wn = w_(n);
       y = sigma * xn + mu;
       xi = y * rho + center;
+      if (!xi.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
+      if (!std::isfinite(logp) || !grad_logp.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
+      if (!grad_logp.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
       value += wn * logp;
       w_grad_rho = wn * grad_logp.dot(rho);
+      if (!std::isfinite(w_grad_rho)) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
       grad(0) += w_grad_rho;
       grad(1) += w_grad_rho * xn * sigma;
     }
@@ -128,6 +149,19 @@ protected:
     const double mu = eta(0);
     const double sigma = scale_from_log_(eta(1));
     return {mu, sigma};
+  }
+
+  void set_bad_kl_(const Eigen::VectorXd& eta, double& value,
+                   Eigen::VectorXd& grad) const {
+    value = bad_kl_value_();
+    grad = Eigen::VectorXd::Zero(eta.size());
+    if (eta.size() > 1 && std::isfinite(eta(1))) {
+      grad(1) = eta(1);
+    }
+  }
+
+  static constexpr double bad_kl_value_() {
+    return 1e100;
   }
 
   double relative_log_scale_(const double raw, const double log_s0) const {
