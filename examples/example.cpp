@@ -27,17 +27,14 @@ int main(int argc, char** argv) {
   std::size_t num_iterations = 30'000;
   std::string model_name = "earnings";
   std::string sampler = "sas";
-  std::size_t initial_transport_steps = 750;
-  std::size_t transport_max_leapfrog_steps = 500;
-  std::size_t transport_stepsize_search_steps = 20;
-  double transport_target_accept = 0.8;
-  double transport_initial_stepsize = 1.0;
-  double transport_min_stepsize = 1e-8;
-  double transport_max_stepsize = 1e6;
-  double transport_max_delta_energy = 1000.0;
-  double transport_momentum_persistence = 0.9;
-  double transport_failure_momentum_decay = 0.5;
-  double transport_max_momentum_norm = 10.0;
+  std::size_t initial_transport_steps = 150;
+  std::size_t transport_max_reflections = 500;
+  double transport_initial_distance = 1.0;
+  double transport_min_distance = 1e-8;
+  double transport_max_distance = 1e6;
+  double transport_max_logp_drop = 1000.0;
+  double transport_direction_persistence = 0.9;
+  double transport_failure_direction_decay = 0.5;
 
   {
     CLI::App app{"Run KLHR."};
@@ -64,54 +61,40 @@ int main(int argc, char** argv) {
                    "Name of sampling algorithm to use");
 
     app.add_option("--initial-transport-steps", initial_transport_steps,
-                   "Initial nonstationary HMC-style transport iterations")
+                   "Initial nonstationary reflected-ray transport iterations")
       ->default_val(initial_transport_steps)
       ->check(CLI::NonNegativeNumber);
 
-    app.add_option("--transport-max-leapfrog-steps", transport_max_leapfrog_steps,
-                   "Maximum leapfrog steps per initial transport iteration")
-      ->default_val(transport_max_leapfrog_steps)
+    app.add_option("--transport-max-reflections", transport_max_reflections,
+                   "Maximum specular reflection segments per initial transport iteration")
+      ->default_val(transport_max_reflections)
       ->check(CLI::NonNegativeNumber);
 
-    app.add_option("--transport-stepsize-search-steps",
-                   transport_stepsize_search_steps,
-                   "Maximum step-size search attempts per initial transport iteration")
-      ->default_val(transport_stepsize_search_steps)
-      ->check(CLI::NonNegativeNumber);
+    app.add_option("--transport-initial-distance", transport_initial_distance,
+                   "Initial Weibull scale guess for reflected transport")
+      ->default_val(transport_initial_distance);
 
-    app.add_option("--transport-target-accept", transport_target_accept,
-                   "One-step Hamiltonian acceptance target for initial transport")
-      ->default_val(transport_target_accept);
+    app.add_option("--transport-min-distance", transport_min_distance,
+                   "Minimum reflected transport ray distance")
+      ->default_val(transport_min_distance);
 
-    app.add_option("--transport-initial-stepsize", transport_initial_stepsize,
-                   "Initial leapfrog step size for initial transport")
-      ->default_val(transport_initial_stepsize);
+    app.add_option("--transport-max-distance", transport_max_distance,
+                   "Maximum reflected transport ray distance")
+      ->default_val(transport_max_distance);
 
-    app.add_option("--transport-min-stepsize", transport_min_stepsize,
-                   "Minimum leapfrog step size for initial transport")
-      ->default_val(transport_min_stepsize);
+    app.add_option("--transport-max-logp-drop", transport_max_logp_drop,
+                   "Maximum allowed log-density drop during reflected transport")
+      ->default_val(transport_max_logp_drop);
 
-    app.add_option("--transport-max-stepsize", transport_max_stepsize,
-                   "Maximum leapfrog step size for initial transport")
-      ->default_val(transport_max_stepsize);
+    app.add_option("--transport-direction-persistence",
+                   transport_direction_persistence,
+                   "Partial direction refresh persistence for initial transport")
+      ->default_val(transport_direction_persistence);
 
-    app.add_option("--transport-max-delta-energy", transport_max_delta_energy,
-                   "Divergence guard for initial transport Hamiltonian error")
-      ->default_val(transport_max_delta_energy);
-
-    app.add_option("--transport-momentum-persistence",
-                   transport_momentum_persistence,
-                   "Partial momentum refresh persistence for initial transport")
-      ->default_val(transport_momentum_persistence);
-
-    app.add_option("--transport-failure-momentum-decay",
-                   transport_failure_momentum_decay,
-                   "Momentum flip/damping factor after failed initial transport")
-      ->default_val(transport_failure_momentum_decay);
-
-    app.add_option("--transport-max-momentum-norm", transport_max_momentum_norm,
-                   "Maximum standardized persistent momentum norm in initial transport")
-      ->default_val(transport_max_momentum_norm);
+    app.add_option("--transport-failure-direction-decay",
+                   transport_failure_direction_decay,
+                   "Direction flip/damping factor after failed initial transport")
+      ->default_val(transport_failure_direction_decay);
 
     CLI11_PARSE(app, argc, argv);
   }
@@ -122,23 +105,20 @@ int main(int argc, char** argv) {
     .seed = seed,
     .warmup = num_warmup,
     .initial_transport_steps = sampler == "sas" ? initial_transport_steps : 0,
-    .transport_max_leapfrog_steps = transport_max_leapfrog_steps,
-    .transport_stepsize_search_steps = transport_stepsize_search_steps,
-    .transport_target_accept = transport_target_accept,
-    .transport_initial_stepsize = transport_initial_stepsize,
-    .transport_min_stepsize = transport_min_stepsize,
-    .transport_max_stepsize = transport_max_stepsize,
-    .transport_max_delta_energy = transport_max_delta_energy,
-    .transport_momentum_persistence = transport_momentum_persistence,
-    .transport_failure_momentum_decay = transport_failure_momentum_decay,
-    .transport_max_momentum_norm = transport_max_momentum_norm,
+    .transport_max_reflections = transport_max_reflections,
+    .transport_initial_distance = transport_initial_distance,
+    .transport_min_distance = transport_min_distance,
+    .transport_max_distance = transport_max_distance,
+    .transport_max_logp_drop = transport_max_logp_drop,
+    .transport_direction_persistence = transport_direction_persistence,
+    .transport_failure_direction_decay = transport_failure_direction_decay,
   };
 
   auto run_sampler = [&](auto& algo) {
     using Algo = std::remove_cvref_t<decltype(algo)>;
 
-    std::size_t D = algo.dim();
-    WelfordAccumulator w{D};
+    Eigen::Index D = algo.dim();
+    mcmcpp::WelfordAccumulator w{D};
 
     Eigen::MatrixXd draws(num_iterations, D);
     Eigen::VectorXd acceptance_rate(num_iterations);
@@ -193,18 +173,18 @@ int main(int argc, char** argv) {
                      vector_to_eigen(algo.proposal_valid_history()));
 
     if constexpr (std::is_base_of_v<klhr::BaseKLHR, Algo>) {
-      h5.createDataSet(std::format("{}/transport_stepsize", model_name),
-                       vector_to_eigen(algo.transport_stepsize_history()));
-      h5.createDataSet(std::format("{}/transport_leapfrog_steps", model_name),
-                       vector_to_eigen(algo.transport_leapfrog_steps_history()));
-      h5.createDataSet(std::format("{}/transport_accept_stat", model_name),
-                       vector_to_eigen(algo.transport_accept_stat_history()));
+      h5.createDataSet(std::format("{}/transport_distance", model_name),
+                       vector_to_eigen(algo.transport_distance_history()));
+      h5.createDataSet(std::format("{}/transport_reflections", model_name),
+                       vector_to_eigen(algo.transport_reflections_history()));
+      h5.createDataSet(std::format("{}/transport_logp_gain", model_name),
+                       vector_to_eigen(algo.transport_logp_gain_history()));
       h5.createDataSet(std::format("{}/transport_uturn", model_name),
                        vector_to_eigen(algo.transport_uturn_history()));
       h5.createDataSet(std::format("{}/transport_moved", model_name),
                        vector_to_eigen(algo.transport_moved_history()));
-      h5.createDataSet(std::format("{}/transport_momentum_norm", model_name),
-                       vector_to_eigen(algo.transport_momentum_norm_history()));
+      h5.createDataSet(std::format("{}/transport_direction_norm", model_name),
+                       vector_to_eigen(algo.transport_direction_norm_history()));
       h5.createDataSet(std::format("{}/transport_variance", model_name),
                        vector_to_matrix(algo.transport_variance_history()));
     }
@@ -220,8 +200,16 @@ int main(int argc, char** argv) {
                        vector_to_eigen(algo.sas_accepted_history()));
     }
 
+    mcmcpp::WelfordAccumulator msjd{};
+    for (std::size_t n = 0; n < num_iterations - 1; ++n) {
+      if (n > num_warmup) {
+        msjd.update((draws.row(n + 1) - draws.row(n)).norm());
+      }
+    }
+
     std::cout << "means: " << w.mean().transpose() << '\n';
     std::cout << "stds: " << w.std().transpose() << '\n';
+    std::cout << "msjd: " << msjd.mean()(0) << '\n';
     std::cout << "Number log_density evals: " << algo.nfev_ << '\n';
     std::cout << "Acceptance rate: " << algo.acceptance_rate_ << '\n';
 

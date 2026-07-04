@@ -1,14 +1,13 @@
 #pragma once
 
-#include "bridgestan.hpp"
 #include "gausshermite.hpp"
-
 #include "onlinepca.hpp"
-#include "rng.hpp"
-#include "welford.hpp"
-#include "windowedadaptation.hpp"
 
 #include <Eigen/Dense>
+#include <bridgestan.hpp>
+#include <rng.hpp>
+#include <welford.hpp>
+#include <windowedadaptation.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -36,16 +35,13 @@ struct KlhrOptions {
   Eigen::Index J = 4;
   double l = 0.0;
   std::size_t initial_transport_steps = 0;
-  std::size_t transport_max_leapfrog_steps = 128;
-  std::size_t transport_stepsize_search_steps = 20;
-  double transport_target_accept = 0.8;
-  double transport_initial_stepsize = 1.0;
-  double transport_min_stepsize = 1e-8;
-  double transport_max_stepsize = 1e6;
-  double transport_max_delta_energy = 1000.0;
-  double transport_momentum_persistence = 0.9;
-  double transport_failure_momentum_decay = 0.5;
-  double transport_max_momentum_norm = 10.0;
+  std::size_t transport_max_reflections = 128;
+  double transport_initial_distance = 1.0;
+  double transport_min_distance = 1e-8;
+  double transport_max_distance = 1e6;
+  double transport_max_logp_drop = 1000.0;
+  double transport_direction_persistence = 0.9;
+  double transport_failure_direction_decay = 0.5;
 };
 
 class BaseKLHR {
@@ -59,7 +55,6 @@ public:
            const KlhrOptions& options = KlhrOptions{}) :
     bsm_(stan_file, json_file),
     rng_(options.seed),
-    uniform_uint_(),
     std_uniform_(0.0, 1.0),
     std_normal_(0.0, 1.0),
     opts_(options),
@@ -67,16 +62,17 @@ public:
                          options.windowscale),
     online_moments_(bsm_.dim()),
     online_pca_(bsm_.dim(), options.J, options.l, options.tol),
-    transport_stepsize_(options.transport_initial_stepsize) {
+    transport_distance_(options.transport_initial_distance) {
 
     if (opts_.seed == 0) {
       std::random_device rd;
       rng_.seed(rd());
     }
 
-    bsrng_ = bsm_.make_rng(uniform_uint_(rng_));
+    std::uniform_int_distribution<unsigned int> uniform_uint;
+    mcmcpp::bsrng bsrng = bsm_.make_rng(uniform_uint(rng_));
     theta_.resize(dim());
-    theta_ = bsm_.param_initialize(bsrng_);
+    theta_ = bsm_.param_initialize(bsrng);
 
     w_.resize(opts_.N);
     x_.resize(opts_.N);
@@ -90,19 +86,18 @@ public:
     eigvecs_ = Eigen::MatrixXd::Zero(D, opts_.J + 1);
     eigvals_ = Eigen::VectorXd::Ones(opts_.J + 1);
     grad_ = Eigen::VectorXd::Zero(D);
-    transport_momentum_ = normal_rng_(D);
-    regularize_transport_momentum_();
+    transport_direction_state_ = normal_rng_(D);
+    regularize_transport_direction_();
 
     nfev_ = 0;
     acceptance_rate_ = 0.0;
     bsm_.log_density_gradient_noe(theta_, log_density_, grad_);
     ++nfev_;
     draw_ = 0;
-    warmup_ = opts_.warmup;
 
-    if (!(transport_stepsize_ > opts_.transport_min_stepsize) ||
-        !std::isfinite(transport_stepsize_)) {
-      transport_stepsize_ = 1.0;
+    if (!(transport_distance_ > opts_.transport_min_distance) ||
+        !std::isfinite(transport_distance_)) {
+      transport_distance_ = 1.0;
     }
   }
 
@@ -148,16 +143,16 @@ public:
     return proposal_valid_;
   }
 
-  const std::vector<double>& transport_stepsize_history() const {
-    return transport_stepsize_history_;
+  const std::vector<double>& transport_distance_history() const {
+    return transport_distance_history_;
   }
 
-  const std::vector<double>& transport_leapfrog_steps_history() const {
-    return transport_leapfrog_steps_;
+  const std::vector<double>& transport_reflections_history() const {
+    return transport_reflections_;
   }
 
-  const std::vector<double>& transport_accept_stat_history() const {
-    return transport_accept_stat_;
+  const std::vector<double>& transport_logp_gain_history() const {
+    return transport_logp_gain_;
   }
 
   const std::vector<double>& transport_uturn_history() const {
@@ -172,8 +167,8 @@ public:
     return transport_variance_;
   }
 
-  const std::vector<double>& transport_momentum_norm_history() const {
-    return transport_momentum_norm_;
+  const std::vector<double>& transport_direction_norm_history() const {
+    return transport_direction_norm_;
   }
 
   Eigen::VectorXd random_direction() {
@@ -209,6 +204,18 @@ protected:
   virtual double transition_density_(const double from, const double to,
                                      const Eigen::VectorXd& eta) = 0;
 
+  virtual Eigen::VectorXd fit_transport_ray_(const Eigen::VectorXd& center,
+                                             const Eigen::VectorXd& rho) {
+    (void) center;
+    (void) rho;
+    return Eigen::VectorXd::Constant(2, nan_());
+  }
+
+  virtual double transport_distance_proposal_(const Eigen::VectorXd& eta) {
+    (void) eta;
+    return nan_();
+  }
+
   virtual void record_kl_step_(const Eigen::VectorXd& eta, const double xi,
                                const bool accepted) {
     (void) eta;
@@ -217,20 +224,18 @@ protected:
   }
 
   mcmcpp::bsmodel bsm_;
-  mcmcpp::bsrng bsrng_;
   mcmcpp::rng rng_;
 
-  std::uniform_int_distribution<unsigned int> uniform_uint_;
   std::uniform_real_distribution<double> std_uniform_;
   std::normal_distribution<double> std_normal_;
 
   KlhrOptions opts_;
-  WindowedAdaptation windowed_adaptation_;
-  WelfordAccumulator online_moments_;
+  mcmcpp::WindowedAdaptation windowed_adaptation_;
+  mcmcpp::WelfordAccumulator online_moments_;
   OnlinePCA online_pca_;
 
   Eigen::VectorXd theta_;
-  Eigen::VectorXd x_; // Guass-Hermite sample points
+  Eigen::VectorXd x_; // Gauss-Hermite sample points
   Eigen::VectorXd w_; // and weights
   Eigen::VectorXd mean_;
   Eigen::VectorXd cov_;
@@ -241,19 +246,18 @@ protected:
   std::vector<double> proposal_log_density_;
   std::vector<double> proposal_accepted_;
   std::vector<double> proposal_valid_;
-  std::vector<double> transport_stepsize_history_;
-  std::vector<double> transport_leapfrog_steps_;
-  std::vector<double> transport_accept_stat_;
+  std::vector<double> transport_distance_history_;
+  std::vector<double> transport_reflections_;
+  std::vector<double> transport_logp_gain_;
   std::vector<double> transport_uturn_;
   std::vector<double> transport_moved_;
-  std::vector<double> transport_momentum_norm_;
+  std::vector<double> transport_direction_norm_;
   std::vector<Eigen::VectorXd> transport_variance_;
   Eigen::VectorXd grad_;
-  Eigen::VectorXd transport_momentum_;
-  double transport_stepsize_;
+  Eigen::VectorXd transport_direction_state_;
+  double transport_distance_;
 
   std::size_t draw_;
-  std::size_t warmup_;
 
   void regular_kl_step_(const Eigen::VectorXd& rho) {
     const double missing_xi = std::numeric_limits<double>::quiet_NaN();
@@ -343,13 +347,10 @@ protected:
     }
   }
 
-  struct HMCState {
+  struct TransportState {
     Eigen::VectorXd theta;
     Eigen::VectorXd grad;
-    Eigen::VectorXd momentum;
     double log_density = std::numeric_limits<double>::quiet_NaN();
-    double log_accept = std::numeric_limits<double>::quiet_NaN();
-    double accept_stat = std::numeric_limits<double>::quiet_NaN();
     bool valid = false;
   };
 
@@ -363,16 +364,16 @@ protected:
     const double logp0 = log_density_;
     const Eigen::VectorXd grad0 = grad_;
     const Eigen::VectorXd scale = metric_scale_();
-    partial_refresh_transport_momentum_();
-    const Eigen::VectorXd momentum0 = transport_momentum_;
+    partial_refresh_transport_direction_();
+    const Eigen::VectorXd direction0 = normalized_transport_direction_();
     const Eigen::VectorXd missing_draw = missing_constrained_draw_();
     const Eigen::VectorXd missing_eta =
       Eigen::VectorXd::Constant(3, std::numeric_limits<double>::quiet_NaN());
 
     if (!theta0.allFinite() || !grad0.allFinite() || !scale.allFinite() ||
-        !std::isfinite(logp0) || !momentum0.allFinite()) {
+        !std::isfinite(logp0) || !direction0.allFinite()) {
       update_acceptance(false);
-      regularize_transport_momentum_();
+      regularize_transport_direction_();
       record_proposal_step_(missing_draw, nan_(), nan_(), false, false);
       record_kl_step_(missing_eta, nan_(), false);
       record_transport_step_(nan_(), 0.0, nan_(), false, false,
@@ -380,46 +381,40 @@ protected:
       return;
     }
 
-    const double epsilon =
-      find_transport_stepsize_(theta0, logp0, grad0, momentum0, scale);
-    if (!(epsilon > 0.0) || !std::isfinite(epsilon)) {
-      update_acceptance(false);
-      update_transport_momentum_(false, true, missing_unconstrained_draw_(),
-                                 momentum0);
-      record_proposal_step_(missing_draw, nan_(), nan_(), false, false);
-      record_kl_step_(missing_eta, nan_(), false);
-      record_transport_step_(epsilon, 0.0, nan_(), false, false,
-                             scale.array().square().matrix());
-      return;
-    }
-
-    HMCState current;
+    TransportState current;
     current.theta = theta0;
     current.grad = grad0;
-    current.momentum = momentum0;
     current.log_density = logp0;
     current.valid = true;
 
-    HMCState endpoint = current;
+    TransportState endpoint = current;
+    Eigen::VectorXd direction = direction0;
+    Eigen::VectorXd endpoint_direction = direction0;
     bool moved = false;
     bool uturn = false;
     bool failed = false;
-    double endpoint_log_accept = nan_();
-    double endpoint_accept_stat = nan_();
-    std::size_t leapfrog_steps = 0;
+    double total_distance = 0.0;
+    double endpoint_logp_gain = nan_();
+    std::size_t reflections = 0;
 
-    for (std::size_t step = 0; step < opts_.transport_max_leapfrog_steps; ++step) {
-      HMCState next = leapfrog_step_(current, epsilon, scale);
+    for (std::size_t step = 0; step < opts_.transport_max_reflections; ++step) {
+      const Eigen::VectorXd rho = (scale.array() * direction.array()).matrix();
+      Eigen::VectorXd eta = fit_transport_ray_(current.theta, rho);
+      double distance = transport_distance_proposal_(eta);
+      if (!eta.allFinite() || !(distance > 0.0) || !std::isfinite(distance)) {
+        failed = true;
+        break;
+      }
+      distance = std::clamp(distance, opts_.transport_min_distance,
+                            opts_.transport_max_distance);
+
+      TransportState next = transport_ray_step_(current, distance, rho);
       if (!next.valid) {
         failed = true;
         break;
       }
 
-      next.log_accept = hmc_log_accept_(logp0, momentum0,
-                                        next.log_density, next.momentum);
-      next.accept_stat = accept_stat_(next.log_accept);
-      if (!std::isfinite(next.log_accept) ||
-          next.log_accept < -std::abs(opts_.transport_max_delta_energy)) {
+      if (logp0 - next.log_density > std::abs(opts_.transport_max_logp_drop)) {
         failed = true;
         break;
       }
@@ -430,8 +425,10 @@ protected:
         failed = true;
         break;
       }
-      const double turning = scaled_delta.dot(next.momentum);
-      if (!std::isfinite(turning) || turning <= 0.0) {
+      const double turning = scaled_delta.dot(direction);
+      const double initial_turning = scaled_delta.dot(direction0);
+      if (!std::isfinite(turning) || !std::isfinite(initial_turning) ||
+          turning <= 0.0 || initial_turning <= 0.0) {
         uturn = true;
         break;
       }
@@ -439,9 +436,18 @@ protected:
       endpoint = next;
       current = next;
       moved = true;
-      leapfrog_steps = step + 1;
-      endpoint_log_accept = next.log_accept;
-      endpoint_accept_stat = next.accept_stat;
+      ++reflections;
+      total_distance += distance;
+      transport_distance_ = distance;
+      endpoint_logp_gain = endpoint.log_density - logp0;
+
+      const Eigen::VectorXd reflected =
+        reflected_transport_direction_(direction, endpoint.grad, scale);
+      if (!reflected.allFinite()) {
+        break;
+      }
+      direction = reflected;
+      endpoint_direction = direction;
     }
 
     Eigen::VectorXd proposal = missing_draw;
@@ -462,40 +468,28 @@ protected:
     }
 
     update_acceptance(moved);
-    update_transport_momentum_(moved, failed, endpoint.momentum, momentum0);
-    record_proposal_step_(proposal, proposal_log_density, endpoint_log_accept,
+    update_transport_direction_(moved, failed, endpoint_direction, direction0);
+    record_proposal_step_(proposal, proposal_log_density, nan_(),
                           moved, moved);
     record_kl_step_(missing_eta, nan_(), false);
-    record_transport_step_(epsilon, static_cast<double>(leapfrog_steps),
-                           endpoint_accept_stat, uturn, moved,
+    record_transport_step_(total_distance, static_cast<double>(reflections),
+                           endpoint_logp_gain, uturn, moved,
                            scale.array().square().matrix());
   }
 
-  HMCState leapfrog_step_(const HMCState& state, const double epsilon,
-                          const Eigen::VectorXd& scale) {
-    HMCState out;
+  TransportState transport_ray_step_(const TransportState& state,
+                                     const double distance,
+                                     const Eigen::VectorXd& rho) {
+    TransportState out;
     out.theta = Eigen::VectorXd::Constant(dim(), nan_());
     out.grad = Eigen::VectorXd::Constant(dim(), nan_());
-    out.momentum = Eigen::VectorXd::Constant(dim(), nan_());
-    if (!state.valid || !(epsilon > 0.0) || !std::isfinite(epsilon) ||
+    if (!state.valid || !(distance > 0.0) || !std::isfinite(distance) ||
         !state.theta.allFinite() || !state.grad.allFinite() ||
-        !state.momentum.allFinite() || !scale.allFinite()) {
+        !rho.allFinite()) {
       return out;
     }
 
-    const Eigen::VectorXd scaled_grad =
-      scale.array() * state.grad.array();
-    if (!scaled_grad.allFinite()) {
-      return out;
-    }
-    const Eigen::VectorXd momentum_half =
-      state.momentum + 0.5 * epsilon * scaled_grad;
-    if (!momentum_half.allFinite()) {
-      return out;
-    }
-
-    out.theta = state.theta +
-      epsilon * (scale.array() * momentum_half.array()).matrix();
+    out.theta = state.theta + distance * rho;
     if (!out.theta.allFinite()) {
       return out;
     }
@@ -506,159 +500,81 @@ protected:
       return out;
     }
 
-    const Eigen::VectorXd scaled_out_grad =
-      scale.array() * out.grad.array();
-    if (!scaled_out_grad.allFinite()) {
-      return out;
-    }
-    out.momentum = momentum_half + 0.5 * epsilon * scaled_out_grad;
-    if (!out.momentum.allFinite()) {
-      return out;
-    }
-
     out.valid = true;
     return out;
   }
 
-  double find_transport_stepsize_(const Eigen::VectorXd& theta,
-                                  const double logp,
-                                  const Eigen::VectorXd& grad,
-                                  const Eigen::VectorXd& momentum,
-                                  const Eigen::VectorXd& scale) {
-    const double target =
-      std::clamp(opts_.transport_target_accept, 1e-6, 1.0 - 1e-6);
-    const double log_target = std::log(target);
-    const double min_epsilon = std::max(opts_.transport_min_stepsize,
-                                        std::numeric_limits<double>::min());
-    const double max_epsilon = std::max(opts_.transport_max_stepsize,
-                                        min_epsilon);
-
-    double epsilon = transport_stepsize_;
-    if (!(epsilon > 0.0) || !std::isfinite(epsilon)) {
-      epsilon = opts_.transport_initial_stepsize;
+  Eigen::VectorXd reflected_transport_direction_(
+      const Eigen::VectorXd& direction,
+      const Eigen::VectorXd& grad,
+      const Eigen::VectorXd& scale) {
+    if (!direction.allFinite() || !grad.allFinite() || !scale.allFinite()) {
+      return missing_unconstrained_draw_();
     }
-    if (!(epsilon > 0.0) || !std::isfinite(epsilon)) {
-      epsilon = 1.0;
+    Eigen::VectorXd normal = (scale.array() * grad.array()).matrix();
+    const double normal_norm = normal.norm();
+    if (!std::isfinite(normal_norm) || normal_norm <= opts_.tol) {
+      return missing_unconstrained_draw_();
     }
-    epsilon = std::clamp(epsilon, min_epsilon, max_epsilon);
-
-    auto trial_log_accept = [&](const double eps) {
-      HMCState start;
-      start.theta = theta;
-      start.grad = grad;
-      start.momentum = momentum;
-      start.log_density = logp;
-      start.valid = true;
-      HMCState next = leapfrog_step_(start, eps, scale);
-      if (!next.valid) {
-        return -std::numeric_limits<double>::infinity();
-      }
-      return hmc_log_accept_(logp, momentum, next.log_density, next.momentum);
-    };
-
-    double log_accept = trial_log_accept(epsilon);
-    if (std::isfinite(log_accept) && log_accept >= log_target) {
-      double best = epsilon;
-      for (std::size_t i = 0; i < opts_.transport_stepsize_search_steps; ++i) {
-        const double candidate = std::min(max_epsilon, best * 2.0);
-        if (!(candidate > best)) {
-          break;
-        }
-        const double candidate_log_accept = trial_log_accept(candidate);
-        if (!std::isfinite(candidate_log_accept) ||
-            candidate_log_accept < log_target) {
-          break;
-        }
-        best = candidate;
-        log_accept = candidate_log_accept;
-      }
-      transport_stepsize_ = best;
-      return best;
+    normal /= normal_norm;
+    Eigen::VectorXd reflected = direction - 2.0 * direction.dot(normal) * normal;
+    const double reflected_norm = reflected.norm();
+    if (!std::isfinite(reflected_norm) || reflected_norm <= opts_.tol) {
+      return missing_unconstrained_draw_();
     }
-
-    for (std::size_t i = 0; i < opts_.transport_stepsize_search_steps; ++i) {
-      epsilon = std::max(min_epsilon, 0.5 * epsilon);
-      log_accept = trial_log_accept(epsilon);
-      if (std::isfinite(log_accept) && log_accept >= log_target) {
-        transport_stepsize_ = epsilon;
-        return epsilon;
-      }
-      if (epsilon <= min_epsilon) {
-        break;
-      }
-    }
-
-    transport_stepsize_ = epsilon;
-    return epsilon;
+    return reflected / reflected_norm;
   }
 
-  double hmc_log_accept_(const double logp0,
-                         const Eigen::VectorXd& momentum0,
-                         const double logp1,
-                         const Eigen::VectorXd& momentum1) const {
-    if (!std::isfinite(logp0) || !std::isfinite(logp1) ||
-        !momentum0.allFinite() || !momentum1.allFinite()) {
-      return -std::numeric_limits<double>::infinity();
-    }
-    return logp1 - 0.5 * momentum1.squaredNorm() -
-      logp0 + 0.5 * momentum0.squaredNorm();
-  }
-
-  double accept_stat_(const double log_accept) const {
-    if (!std::isfinite(log_accept)) {
-      return 0.0;
-    }
-    return std::exp(std::min(0.0, log_accept));
-  }
-
-  void partial_refresh_transport_momentum_() {
+  void partial_refresh_transport_direction_() {
     const double a =
-      std::clamp(opts_.transport_momentum_persistence, 0.0, 1.0);
+      std::clamp(opts_.transport_direction_persistence, 0.0, 1.0);
     const double b = std::sqrt(std::max(0.0, 1.0 - a * a));
-    if (transport_momentum_.size() != static_cast<Eigen::Index>(dim()) ||
-        !transport_momentum_.allFinite()) {
-      transport_momentum_ = normal_rng_(dim());
+    if (transport_direction_state_.size() != static_cast<Eigen::Index>(dim()) ||
+        !transport_direction_state_.allFinite()) {
+      transport_direction_state_ = normal_rng_(dim());
     } else {
-      transport_momentum_ = a * transport_momentum_ + b * normal_rng_(dim());
+      transport_direction_state_ = a * transport_direction_state_ + b * normal_rng_(dim());
     }
-    regularize_transport_momentum_();
+    regularize_transport_direction_();
   }
 
-  void update_transport_momentum_(const bool moved,
-                                  const bool failed,
-                                  const Eigen::VectorXd& endpoint_momentum,
-                                  const Eigen::VectorXd& initial_momentum) {
+  void update_transport_direction_(const bool moved,
+                                   const bool failed,
+                                   const Eigen::VectorXd& endpoint_direction,
+                                   const Eigen::VectorXd& initial_direction) {
     const double decay =
-      std::clamp(opts_.transport_failure_momentum_decay, 0.0, 1.0);
-    if (moved && endpoint_momentum.allFinite()) {
-      transport_momentum_ = endpoint_momentum;
+      std::clamp(opts_.transport_failure_direction_decay, 0.0, 1.0);
+    if (moved && endpoint_direction.allFinite()) {
+      transport_direction_state_ = endpoint_direction;
       if (failed) {
-        transport_momentum_ *= decay;
+        transport_direction_state_ *= decay;
       }
     } else {
-      transport_momentum_ = -decay * initial_momentum;
+      transport_direction_state_ = -decay * initial_direction;
     }
 
-    regularize_transport_momentum_();
+    regularize_transport_direction_();
   }
 
-  void regularize_transport_momentum_() {
-    if (transport_momentum_.size() != static_cast<Eigen::Index>(dim()) ||
-        !transport_momentum_.allFinite()) {
-      transport_momentum_ = normal_rng_(dim());
+  void regularize_transport_direction_() {
+    if (transport_direction_state_.size() != static_cast<Eigen::Index>(dim()) ||
+        !transport_direction_state_.allFinite()) {
+      transport_direction_state_ = normal_rng_(dim());
     }
 
-    double norm = transport_momentum_.norm();
+    double norm = transport_direction_state_.norm();
     if (!std::isfinite(norm) || norm <= opts_.tol) {
-      transport_momentum_ = normal_rng_(dim());
-      norm = transport_momentum_.norm();
+      transport_direction_state_ = normal_rng_(dim());
     }
+  }
 
-    if (opts_.transport_max_momentum_norm > 0.0 &&
-        std::isfinite(opts_.transport_max_momentum_norm) &&
-        norm > opts_.transport_max_momentum_norm) {
-      transport_momentum_ *= opts_.transport_max_momentum_norm / norm;
+  Eigen::VectorXd normalized_transport_direction_() {
+    regularize_transport_direction_();
+    const double norm = transport_direction_state_.norm();
+    if (!std::isfinite(norm) || norm <= opts_.tol) {
+      return missing_unconstrained_draw_();
     }
+    return transport_direction_state_ / norm;
   }
 
   Eigen::VectorXd missing_constrained_draw_() {
@@ -695,23 +611,19 @@ protected:
     proposal_valid_.push_back(valid ? 1.0 : 0.0);
   }
 
-  void record_transport_step_(const double stepsize,
-                              const double leapfrog_steps,
-                              const double accept_stat,
+  void record_transport_step_(const double distance,
+                              const double reflections,
+                              const double logp_gain,
                               const bool uturn,
                               const bool moved,
                               const Eigen::VectorXd& variance) {
-    transport_stepsize_history_.push_back(stepsize);
-    transport_leapfrog_steps_.push_back(leapfrog_steps);
-    transport_accept_stat_.push_back(accept_stat);
+    transport_distance_history_.push_back(distance);
+    transport_reflections_.push_back(reflections);
+    transport_logp_gain_.push_back(logp_gain);
     transport_uturn_.push_back(uturn ? 1.0 : 0.0);
     transport_moved_.push_back(moved ? 1.0 : 0.0);
     transport_variance_.push_back(variance);
-    transport_momentum_norm_.push_back(transport_momentum_.norm());
-  }
-
-  bool in_warmup_() const {
-    return draw_ > 0 && draw_ <= warmup_;
+    transport_direction_norm_.push_back(transport_direction_state_.norm());
   }
 
   Eigen::VectorXd metric_scale_() {
@@ -728,7 +640,7 @@ protected:
 
   void adapt_warmup_(const Eigen::VectorXd& theta,
                      const std::size_t adaptation_draw) {
-    if (adaptation_draw == 0 || adaptation_draw > warmup_) {
+    if (adaptation_draw == 0 || adaptation_draw > opts_.warmup) {
       return;
     }
 

@@ -17,17 +17,6 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra)
 endif()
 
-set(SOURCES
-  include/onlinepca.hpp
-  include/windowedadaptation.hpp
-  include/lbfgstransport.hpp
-  include/hdf5drawwriter.hpp
-  include/klhr.hpp
-  include/gausshermite.hpp
-  include/gausslaguerre.hpp
-  include/welford.hpp
-)
-
 include(FetchContent)
 
 ## Eigen
@@ -39,26 +28,31 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(eigen)
 
-
 ## dylib
 FetchContent_Declare(
     dylib
-    GIT_REPOSITORY "https://github.com/martin-olivier/dylib"
+    GIT_REPOSITORY https://github.com/martin-olivier/dylib.git
     GIT_TAG        "v3.0.1"
 )
 FetchContent_MakeAvailable(dylib)
 
 ## mcmcpp
-add_library(mcmcpp INTERFACE IMPORTED)
-target_include_directories(mcmcpp INTERFACE
-    "/Users/edward/mcmcpp/include"
+FetchContent_Declare(
+    mcmcpp
+    GIT_REPOSITORY https://github.com/roualdes/mcmcpp.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
 )
+FetchContent_MakeAvailable(mcmcpp)
 
 ## bfgs
-add_library(bfgs INTERFACE IMPORTED)
-target_include_directories(mcmcpp INTERFACE
-    "/Users/edward/bfgs/include"
+FetchContent_Declare(
+    bfgs
+    GIT_REPOSITORY https://github.com/roualdes/bfgs.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
 )
+FetchContent_MakeAvailable(bfgs)
 
 ## HDF5
 # HDF5 need be installed and findable

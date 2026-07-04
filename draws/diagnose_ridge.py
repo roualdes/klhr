@@ -212,12 +212,12 @@ def main():
             if "leapfrog_momentum_norm" in root:
                 extra["leapfrog momentum norm"] = np.asarray(root["leapfrog_momentum_norm"]).reshape(-1)
         for key, label in [
-            ("transport_stepsize", "transport stepsize"),
-            ("transport_leapfrog_steps", "transport leapfrog steps"),
-            ("transport_accept_stat", "transport accept stat"),
+            ("transport_distance", "transport distance"),
+            ("transport_reflections", "transport reflections"),
+            ("transport_logp_gain", "transport logp gain"),
             ("transport_uturn", "transport uturn"),
             ("transport_moved", "transport moved"),
-            ("transport_momentum_norm", "transport momentum norm"),
+            ("transport_direction_norm", "transport direction norm"),
             ("transport_variance", "transport variance"),
         ]:
             if key in root:
