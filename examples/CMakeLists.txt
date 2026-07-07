@@ -17,3 +17,17 @@ target_link_libraries(example PRIVATE
                               CLI11::CLI11
 )
 target_compile_options(example PRIVATE -Wall -Wextra)
+
+add_executable(mala mala.cpp)
+target_include_directories(mala PRIVATE ${HDF5_INCLUDE_DIRS})
+target_link_libraries(mala PRIVATE
+                           klhr
+                           bfgs
+	                   mcmcpp
+                           dylib
+                           Eigen3::Eigen
+                           ${KLHR_HIGHFIVE_TARGET}
+                           ${HDF5_LIBRARIES}
+                           CLI11::CLI11
+)
+target_compile_options(mala PRIVATE -Wall -Wextra)
