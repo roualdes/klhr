@@ -31,3 +31,17 @@ target_link_libraries(mala PRIVATE
                            CLI11::CLI11
 )
 target_compile_options(mala PRIVATE -Wall -Wextra)
+
+add_executable(barker barker.cpp)
+target_include_directories(barker PRIVATE ${HDF5_INCLUDE_DIRS})
+target_link_libraries(barker PRIVATE
+                              klhr
+                              bfgs
+                              mcmcpp
+                              dylib
+                              Eigen3::Eigen
+                              ${KLHR_HIGHFIVE_TARGET}
+                              ${HDF5_LIBRARIES}
+                              CLI11::CLI11
+)
+target_compile_options(barker PRIVATE -Wall -Wextra)

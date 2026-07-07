@@ -13,19 +13,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <numbers>
 #include <random>
 #include <string>
 
 namespace klhr {
 
-struct MALAOptions {
+struct BarkerOptions {
   std::uint64_t seed = 0;
   std::size_t warmup = 1'000;
   std::size_t initial_buffer = 75;
   std::size_t terminal_buffer = 50;
   std::size_t windowsize = 25;
   std::size_t windowscale = 2;
-  double target_accept = 0.57;
+  double target_accept = 0.4;
   double initial_stepsize = 1.0;
   double min_stepsize = 1e-12;
   double max_stepsize = 1e3;
@@ -38,14 +39,14 @@ struct MALAOptions {
   double grad_clip = std::numeric_limits<double>::infinity();
 };
 
-class MALA {
+class Barker {
 public:
   std::size_t nfev_;
   double acceptance_rate_;
   double log_density_;
 
-  MALA(std::string stan_file, std::string json_file,
-       const MALAOptions& options = MALAOptions{}) :
+  Barker(std::string stan_file, std::string json_file,
+         const BarkerOptions& options = BarkerOptions{}) :
     bsm_(stan_file, json_file),
     rng_(options.seed),
     std_uniform_(0.0, 1.0),
@@ -107,7 +108,7 @@ public:
   Eigen::VectorXd draw() {
     ++draw_;
 
-    MALAProposal proposal = make_proposal_(stepsize_, variance_);
+    BarkerProposal proposal = make_proposal_(stepsize_, variance_);
     const double accept_stat = proposal.valid ?
       std::exp(std::min(0.0, proposal.log_accept)) : 0.0;
     const bool accepted =
@@ -172,7 +173,7 @@ public:
   }
 
 private:
-  struct MALAProposal {
+  struct BarkerProposal {
     Eigen::VectorXd theta;
     Eigen::VectorXd grad;
     double log_density = -std::numeric_limits<double>::infinity();
@@ -184,7 +185,7 @@ private:
   mcmcpp::rng rng_;
   std::uniform_real_distribution<double> std_uniform_;
   std::normal_distribution<double> std_normal_;
-  MALAOptions opts_;
+  BarkerOptions opts_;
   Adam adam_;
   mcmcpp::WindowedAdaptation metric_windowed_adaptation_;
   mcmcpp::WelfordAccumulator online_moments_;
@@ -197,22 +198,27 @@ private:
   std::size_t draw_;
   bool final_adam_reset_ = false;
 
-  MALAProposal make_proposal_(const double epsilon,
-                              const Eigen::VectorXd& variance) {
-    MALAProposal out;
+  BarkerProposal make_proposal_(const double epsilon,
+                                const Eigen::VectorXd& variance) {
+    BarkerProposal out;
     if (!(epsilon > 0.0) || !std::isfinite(epsilon) ||
         !theta_.allFinite() || !grad_.allFinite() ||
         !variance.allFinite()) {
       return out;
     }
 
-    Eigen::VectorXd z = normal_rng_(dim());
-    Eigen::VectorXd sqrt_variance = variance.cwiseSqrt();
-    Eigen::VectorXd drift =
-      0.5 * epsilon * epsilon *
-      (variance.array() * grad_.array()).matrix();
-    out.theta = theta_ + drift +
-      epsilon * (sqrt_variance.array() * z.array()).matrix();
+    const Eigen::ArrayXd scale =
+      epsilon * variance.array().max(opts_.variance_floor).sqrt();
+    Eigen::VectorXd delta(dim());
+    for (Eigen::Index d = 0; d < delta.size(); ++d) {
+      const double magnitude = scale(d) * std::abs(std_normal_(rng_));
+      const double logit = grad_(d) * magnitude;
+      const double p_plus = logistic_(logit);
+      const double sign = std_uniform_(rng_) < p_plus ? 1.0 : -1.0;
+      delta(d) = sign * magnitude;
+    }
+
+    out.theta = theta_ + delta;
     if (!out.theta.allFinite()) {
       return out;
     }
@@ -238,7 +244,7 @@ private:
   }
 
   double trial_accept_stat_(const double epsilon) {
-    MALAProposal proposal = make_proposal_(epsilon, variance_);
+    BarkerProposal proposal = make_proposal_(epsilon, variance_);
     if (!proposal.valid) {
       return 0.0;
     }
@@ -256,16 +262,19 @@ private:
       return -std::numeric_limits<double>::infinity();
     }
 
-    const Eigen::ArrayXd var = variance.array().max(opts_.variance_floor);
-    const Eigen::VectorXd mean = from +
-      0.5 * epsilon * epsilon *
-      (var * grad_from.array()).matrix();
-    const Eigen::ArrayXd diff = (to - mean).array();
-    const double scale2 = epsilon * epsilon;
-    const double quad = (diff.square() / (scale2 * var)).sum();
-    const double logdet =
-      static_cast<double>(to.size()) * std::log(scale2) + var.log().sum();
-    return -0.5 * (quad + logdet);
+    const Eigen::ArrayXd scale =
+      epsilon * variance.array().max(opts_.variance_floor).sqrt();
+    const Eigen::ArrayXd delta = (to - from).array();
+    double log_density = 0.0;
+    for (Eigen::Index d = 0; d < delta.size(); ++d) {
+      const double z = std::abs(delta(d)) / scale(d);
+      const double base_log_density =
+        std::log(2.0) - 0.5 * std::log(2.0 * std::numbers::pi) -
+        std::log(scale(d)) - 0.5 * z * z;
+      log_density += base_log_density +
+        log_logistic_(grad_from(d) * delta(d));
+    }
+    return log_density;
   }
 
   void adapt_warmup_(const double accept_stat) {
@@ -341,11 +350,20 @@ private:
     return grad.array().min(opts_.grad_clip).max(-opts_.grad_clip).matrix();
   }
 
-  Eigen::VectorXd normal_rng_(const Eigen::Index D) {
-    Eigen::VectorXd out(D);
-    std::generate(out.data(), out.data() + D,
-                  [&](){ return std_normal_(rng_); });
-    return out;
+  static double logistic_(const double x) {
+    if (x >= 0.0) {
+      const double e = std::exp(-x);
+      return 1.0 / (1.0 + e);
+    }
+    const double e = std::exp(x);
+    return e / (1.0 + e);
+  }
+
+  static double log_logistic_(const double x) {
+    if (x >= 0.0) {
+      return -std::log1p(std::exp(-x));
+    }
+    return x - std::log1p(std::exp(x));
   }
 
   std::size_t metric_start_() const {
@@ -360,7 +378,7 @@ private:
     return std::max(start, opts_.warmup - opts_.terminal_buffer);
   }
 
-  static std::size_t metric_warmup_(const MALAOptions& options) {
+  static std::size_t metric_warmup_(const BarkerOptions& options) {
     const std::size_t start =
       std::min(options.initial_buffer, options.warmup);
     if (options.warmup <= start || options.warmup <= options.terminal_buffer) {
