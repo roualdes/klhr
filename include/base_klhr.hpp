@@ -32,7 +32,14 @@ struct KlhrOptions {
   std::size_t warmup = 1'000;
   std::size_t windowsize = 50;
   std::size_t windowscale = 2;
-  Eigen::Index J = 4;
+  Eigen::Index J = 6;
+  Eigen::Index direction_noise_rank = -1;
+  double direction_lowrank_weight = 0.5;
+  double direction_min_diag_fraction = 0.1;
+  bool lowrank_during_warmup = false;
+  double pca_freeze_fraction = 0.1;
+  double transport_cov_shrink = 0.25;
+  double transport_cov_ratio_cap = 4.0;
   double l = 0.0;
   std::size_t initial_transport_steps = 0;
   std::size_t transport_max_reflections = 128;
@@ -57,16 +64,24 @@ public:
     rng_(options.seed),
     std_uniform_(0.0, 1.0),
     std_normal_(0.0, 1.0),
-    opts_(options),
-    windowed_adaptation_(options.warmup, options.windowsize,
-                         options.windowscale),
+    opts_(normalized_options_(options, bsm_.dim())),
+    windowed_adaptation_(opts_.warmup, opts_.windowsize,
+                         opts_.windowscale),
     online_moments_(bsm_.dim()),
-    online_pca_(bsm_.dim(), options.J, options.l, options.tol),
-    transport_distance_(options.transport_initial_distance) {
+    transport_moments_(bsm_.dim()),
+    online_pca_(bsm_.dim(), opts_.J, opts_.l, opts_.tol),
+    projected_moments_(opts_.J),
+    transport_distance_(opts_.transport_initial_distance) {
 
     if (opts_.seed == 0) {
       std::random_device rd;
-      rng_.seed(rd());
+      std::uint64_t r1 = rd();
+      std::uint64_t r2 = rd();
+      opts_.seed = (r1 << 32) ^ r2;
+      if (opts_.seed == 0) {
+        opts_.seed = 1;
+      }
+      rng_.seed(opts_.seed);
     }
 
     std::uniform_int_distribution<unsigned int> uniform_uint;
@@ -85,6 +100,12 @@ public:
     cov_ = Eigen::VectorXd::Ones(D);
     eigvecs_ = Eigen::MatrixXd::Zero(D, opts_.J + 1);
     eigvals_ = Eigen::VectorXd::Ones(opts_.J + 1);
+    projection_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
+    mean_direction_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
+    mean_direction_weights_ = Eigen::VectorXd::Ones(opts_.J);
+    transport_mean_smooth_ = theta_;
+    transport_cov_smooth_ = Eigen::VectorXd::Ones(D);
+    transport_moments_.update(theta_);
     grad_ = Eigen::VectorXd::Zero(D);
     transport_direction_state_ = normal_rng_(D);
     regularize_transport_direction_();
@@ -107,11 +128,18 @@ public:
     return bsm_.dim();
   }
 
+  std::uint64_t seed() const {
+    return opts_.seed;
+  }
+
   Eigen::VectorXd draw() {
     ++draw_;
     if (draw_ <= opts_.initial_transport_steps) {
       initial_transport_step_();
-      adapt_warmup_(theta_, draw_);
+      adapt_transport_warmup_(draw_);
+      if (draw_ == opts_.initial_transport_steps) {
+        finalize_transport_handoff_();
+      }
       return bsm_.param_constrain(theta_);
     }
 
@@ -172,21 +200,15 @@ public:
   }
 
   Eigen::VectorXd random_direction() {
-    Eigen::VectorXd weights = eigvals_.cwiseMax(0.0);
-    std::discrete_distribution<Eigen::Index> component(weights.data(),
-                                                      weights.data() + weights.size());
-    const Eigen::Index j = component(rng_);
-
-    Eigen::VectorXd rho(dim());
-    const Eigen::VectorXd center = eigvecs_.col(j);
-    for (Eigen::Index d = 0; d < rho.size(); ++d) {
-      const double variance = std::max(cov_(d), opts_.tol);
-      rho(d) = center(d) + std::sqrt(variance) * std_normal_(rng_);
-    }
+    const Eigen::Index D = static_cast<Eigen::Index>(dim());
+    const bool use_sampling_direction =
+      (opts_.lowrank_during_warmup || draw_ > opts_.warmup) && lowrank_ready_;
+    Eigen::VectorXd rho = use_sampling_direction ?
+      direction_noise_() : mean_direction_noise_();
 
     double norm = rho.norm();
     if (!std::isfinite(norm) || norm <= opts_.tol) {
-      rho = normal_rng_(dim());
+      rho = normal_rng_(D);
       norm = rho.norm();
     }
     rho /= norm + opts_.tol;
@@ -223,6 +245,25 @@ protected:
     (void) accepted;
   }
 
+  static KlhrOptions normalized_options_(KlhrOptions options,
+                                         const std::size_t dim) {
+    const Eigen::Index D = static_cast<Eigen::Index>(dim);
+    options.J = std::clamp(options.J, Eigen::Index{0}, D);
+    if (options.direction_noise_rank < 0) {
+      options.direction_noise_rank = options.J;
+    } else {
+      options.direction_noise_rank =
+        std::clamp(options.direction_noise_rank, Eigen::Index{0}, options.J);
+    }
+    options.pca_freeze_fraction =
+      std::clamp(options.pca_freeze_fraction, 0.0, 1.0);
+    options.transport_cov_shrink =
+      std::clamp(options.transport_cov_shrink, 0.0, 1.0);
+    options.transport_cov_ratio_cap =
+      std::max(options.transport_cov_ratio_cap, 1.0);
+    return options;
+  }
+
   mcmcpp::bsmodel bsm_;
   mcmcpp::rng rng_;
 
@@ -232,7 +273,9 @@ protected:
   KlhrOptions opts_;
   mcmcpp::WindowedAdaptation windowed_adaptation_;
   mcmcpp::WelfordAccumulator online_moments_;
+  mcmcpp::WelfordAccumulator transport_moments_;
   OnlinePCA online_pca_;
+  mcmcpp::WelfordAccumulator projected_moments_;
 
   Eigen::VectorXd theta_;
   Eigen::VectorXd x_; // Gauss-Hermite sample points
@@ -241,6 +284,11 @@ protected:
   Eigen::VectorXd cov_;
   Eigen::MatrixXd eigvecs_;
   Eigen::VectorXd eigvals_;
+  Eigen::MatrixXd projection_basis_;
+  Eigen::MatrixXd mean_direction_basis_;
+  Eigen::VectorXd mean_direction_weights_;
+  Eigen::VectorXd transport_mean_smooth_;
+  Eigen::VectorXd transport_cov_smooth_;
   std::vector<Eigen::VectorXd> proposal_draws_;
   std::vector<double> proposal_log_accept_;
   std::vector<double> proposal_log_density_;
@@ -256,6 +304,12 @@ protected:
   Eigen::VectorXd grad_;
   Eigen::VectorXd transport_direction_state_;
   double transport_distance_;
+  bool projection_basis_ready_ = false;
+  bool mean_direction_ready_ = false;
+  bool mean_direction_whitened_ = false;
+  bool pca_frozen_ = false;
+  bool lowrank_ready_ = false;
+  std::size_t projected_pair_count_ = 0;
 
   std::size_t draw_;
 
@@ -464,6 +518,8 @@ protected:
         grad_ = grad0;
         log_density_ = logp0;
         proposal_log_density = nan_();
+      } else {
+        update_transport_covariance_(theta_);
       }
     }
 
@@ -638,25 +694,463 @@ protected:
     return scale;
   }
 
+  void update_transport_covariance_(const Eigen::VectorXd& theta) {
+    if (theta.size() != static_cast<Eigen::Index>(dim()) ||
+        !theta.allFinite()) {
+      return;
+    }
+
+    transport_moments_.update(theta);
+    if (transport_moments_.count() <= 1) {
+      return;
+    }
+
+    Eigen::VectorXd raw_mean = transport_moments_.mean();
+    Eigen::VectorXd raw_var = transport_moments_.variance();
+    if (raw_mean.size() != static_cast<Eigen::Index>(dim()) ||
+        raw_var.size() != static_cast<Eigen::Index>(dim()) ||
+        !raw_mean.allFinite() ||
+        !raw_var.allFinite()) {
+      return;
+    }
+
+    const double shrink = opts_.transport_cov_shrink;
+    const double ratio_cap = opts_.transport_cov_ratio_cap;
+    if (!(ratio_cap >= 1.0) || !std::isfinite(ratio_cap)) {
+      return;
+    }
+
+    if (transport_cov_smooth_.size() != raw_var.size() ||
+        !transport_cov_smooth_.allFinite()) {
+      transport_cov_smooth_ = Eigen::VectorXd::Ones(raw_var.size());
+    }
+
+    for (Eigen::Index d = 0; d < raw_var.size(); ++d) {
+      const double old_var = std::max(transport_cov_smooth_(d), opts_.tol);
+      const double target_var = std::max(raw_var(d), opts_.tol);
+      const double proposal =
+        (1.0 - shrink) * old_var + shrink * target_var;
+      const double lo = old_var / ratio_cap;
+      const double hi = old_var * ratio_cap;
+      transport_cov_smooth_(d) = std::clamp(proposal, lo, hi);
+    }
+
+    if (transport_cov_smooth_.allFinite()) {
+      cov_ = transport_cov_smooth_;
+    }
+
+    update_transport_mean_smooth_(raw_mean);
+    update_transport_mean_direction_basis_(theta);
+  }
+
+  void update_transport_mean_smooth_(const Eigen::VectorXd& raw_mean) {
+    if (raw_mean.size() != static_cast<Eigen::Index>(dim()) ||
+        !raw_mean.allFinite()) {
+      return;
+    }
+
+    if (transport_mean_smooth_.size() != raw_mean.size() ||
+        !transport_mean_smooth_.allFinite()) {
+      transport_mean_smooth_ = raw_mean;
+      return;
+    }
+
+    const double shrink = opts_.transport_cov_shrink;
+    const double cap = opts_.transport_cov_ratio_cap;
+    for (Eigen::Index d = 0; d < raw_mean.size(); ++d) {
+      const double var =
+        transport_cov_smooth_.size() == raw_mean.size() ?
+        transport_cov_smooth_(d) : 1.0;
+      const double sd = std::sqrt(std::max(var, opts_.tol));
+      const double max_step = cap * sd;
+      const double old_mean = transport_mean_smooth_(d);
+      const double proposal =
+        old_mean + shrink * (raw_mean(d) - old_mean);
+      if (!std::isfinite(proposal) || !std::isfinite(max_step)) {
+        continue;
+      }
+      transport_mean_smooth_(d) =
+        std::clamp(proposal, old_mean - max_step, old_mean + max_step);
+    }
+  }
+
+  void update_transport_mean_direction_basis_(const Eigen::VectorXd& theta) {
+    if (opts_.J <= 0 ||
+        theta.size() != static_cast<Eigen::Index>(dim()) ||
+        !theta.allFinite() ||
+        transport_moments_.count() < 2) {
+      return;
+    }
+
+    if (transport_mean_smooth_.size() != theta.size() ||
+        !transport_mean_smooth_.allFinite()) {
+      return;
+    }
+
+    const Eigen::VectorXd centered = theta - transport_mean_smooth_;
+    if (!centered.allFinite() || centered.norm() <= opts_.tol) {
+      return;
+    }
+
+    online_pca_.update(centered);
+    (void) set_mean_direction_from_online_pca_(true);
+  }
+
+  Eigen::VectorXd direction_noise_() {
+    const Eigen::Index D = static_cast<Eigen::Index>(dim());
+    const double alpha =
+      std::clamp(opts_.direction_lowrank_weight, 0.0, 1.0);
+    const double min_diag_fraction =
+      std::clamp(opts_.direction_min_diag_fraction, 0.0, 1.0);
+
+    Eigen::VectorXd base_var(D);
+    Eigen::VectorXd residual_var(D);
+    for (Eigen::Index d = 0; d < D; ++d) {
+      double v = cov_(d);
+      if (!std::isfinite(v) || v <= opts_.tol) {
+        v = opts_.tol;
+      }
+      base_var(d) = v;
+      residual_var(d) = v;
+    }
+
+    const Eigen::Index rank = direction_noise_rank_();
+    if (rank > 0 && alpha > 0.0) {
+      for (Eigen::Index k = 0; k < rank; ++k) {
+        const double lambda = direction_lowrank_variance_(k);
+        const Eigen::VectorXd v = eigvecs_.col(k);
+        if (!(lambda > 0.0) || !std::isfinite(lambda) || !v.allFinite()) {
+          continue;
+        }
+        residual_var -= alpha * lambda * v.array().square().matrix();
+      }
+    }
+
+    for (Eigen::Index d = 0; d < D; ++d) {
+      const double floor = std::max(opts_.tol, min_diag_fraction * base_var(d));
+      if (!std::isfinite(residual_var(d)) || residual_var(d) < floor) {
+        residual_var(d) = floor;
+      }
+    }
+
+    Eigen::VectorXd noise =
+      residual_var.array().sqrt().matrix().cwiseProduct(normal_rng_(D));
+    if (rank > 0 && alpha > 0.0) {
+      for (Eigen::Index k = 0; k < rank; ++k) {
+        const double lambda = direction_lowrank_variance_(k);
+        const Eigen::VectorXd v = eigvecs_.col(k);
+        if (!(lambda > 0.0) || !std::isfinite(lambda) || !v.allFinite()) {
+          continue;
+        }
+        noise += std::sqrt(alpha * lambda) * std_normal_(rng_) * v;
+      }
+    }
+
+    if (!noise.allFinite()) {
+      return normal_rng_(D);
+    }
+    return noise;
+  }
+
+  Eigen::VectorXd diagonal_direction_noise_() {
+    const Eigen::Index D = static_cast<Eigen::Index>(dim());
+    Eigen::VectorXd noise(D);
+    for (Eigen::Index d = 0; d < D; ++d) {
+      double v = cov_(d);
+      if (!std::isfinite(v) || v <= opts_.tol) {
+        v = opts_.tol;
+      }
+      noise(d) = std::sqrt(v) * std_normal_(rng_);
+    }
+    return noise;
+  }
+
+  Eigen::VectorXd mean_direction_noise_() {
+    const Eigen::Index D = static_cast<Eigen::Index>(dim());
+    if (!mean_direction_ready_ || opts_.J <= 0 ||
+        mean_direction_basis_.rows() != D ||
+        mean_direction_basis_.cols() != opts_.J ||
+        mean_direction_weights_.size() != opts_.J ||
+        !mean_direction_basis_.allFinite() ||
+        !mean_direction_weights_.allFinite()) {
+      return diagonal_direction_noise_();
+    }
+
+    Eigen::VectorXd weights = mean_direction_weights_.cwiseMax(0.0);
+    if (!(weights.sum() > opts_.tol) || !weights.allFinite()) {
+      weights.setOnes();
+    }
+
+    std::discrete_distribution<Eigen::Index> component(
+      weights.data(), weights.data() + weights.size());
+    const Eigen::Index j = component(rng_);
+    if (j < 0 || j >= mean_direction_basis_.cols()) {
+      return diagonal_direction_noise_();
+    }
+
+    Eigen::VectorXd noise;
+    if (mean_direction_whitened_) {
+      noise = normal_rng_(D);
+      noise += mean_direction_basis_.col(j);
+      Eigen::VectorXd scale = metric_scale_();
+      if (scale.size() != D || !scale.allFinite()) {
+        return diagonal_direction_noise_();
+      }
+      noise = scale.array() * noise.array();
+    } else {
+      noise = diagonal_direction_noise_();
+      noise += mean_direction_basis_.col(j);
+    }
+    return noise;
+  }
+
+  Eigen::Index direction_noise_rank_() const {
+    if (!lowrank_ready_) {
+      return 0;
+    }
+    const Eigen::Index max_rank =
+      std::min({opts_.direction_noise_rank, opts_.J,
+                eigvecs_.cols(), eigvals_.size()});
+    return std::max<Eigen::Index>(0, max_rank);
+  }
+
+  double direction_lowrank_variance_(const Eigen::Index k) const {
+    if (k < 0 || k >= eigvals_.size() || k >= eigvecs_.cols()) {
+      return 0.0;
+    }
+    const Eigen::VectorXd v = eigvecs_.col(k);
+    if (!v.allFinite()) {
+      return 0.0;
+    }
+    double lambda = eigvals_(k);
+    if (!std::isfinite(lambda) || lambda <= opts_.tol) {
+      return 0.0;
+    }
+    return lambda;
+  }
+
+  bool pca_calibration_enabled_() const {
+    return opts_.J > 0 &&
+      opts_.direction_noise_rank > 0 &&
+      opts_.windowsize > 0 &&
+      opts_.pca_freeze_fraction > 0.0 &&
+      pca_final_window_length_() > 2;
+  }
+
+  std::size_t pca_freeze_start_() const {
+    const std::size_t final_start = pca_final_window_start_();
+    const std::size_t final_length = pca_final_window_length_();
+    const auto tail = static_cast<std::size_t>(
+      std::ceil(opts_.pca_freeze_fraction *
+                static_cast<double>(final_length)));
+    const std::size_t tail_length = std::clamp<std::size_t>(tail, 1,
+                                                            final_length);
+    return std::max(final_start, opts_.warmup - tail_length);
+  }
+
+  std::size_t pca_final_window_length_() const {
+    const std::size_t final_start = pca_final_window_start_();
+    if (final_start > opts_.warmup) {
+      return 0;
+    }
+    return opts_.warmup - final_start + 1;
+  }
+
+  std::size_t pca_final_window_start_() const {
+    if (opts_.warmup == 0) {
+      return 0;
+    }
+    if (opts_.windowsize == 0 || opts_.warmup <= opts_.windowsize) {
+      return 1;
+    }
+
+    const std::size_t scale = std::max<std::size_t>(opts_.windowscale, 1);
+    std::size_t window_size = opts_.windowsize;
+    std::size_t close_window = opts_.windowsize;
+    std::size_t previous_close = 0;
+
+    while (close_window < opts_.warmup) {
+      previous_close = close_window;
+      if (window_size >
+          std::numeric_limits<std::size_t>::max() / scale) {
+        break;
+      }
+      window_size *= scale;
+
+      const std::size_t remaining = opts_.warmup - close_window;
+      const bool next_window_reaches_warmup =
+        window_size > std::numeric_limits<std::size_t>::max() / scale ||
+        scale * window_size >= remaining;
+      if (next_window_reaches_warmup) {
+        close_window = opts_.warmup;
+      } else {
+        close_window += window_size;
+      }
+    }
+
+    return previous_close + 1;
+  }
+
+  bool set_projection_basis_from_online_pca_() {
+    if (opts_.J <= 0 || online_pca_.count() < static_cast<std::size_t>(opts_.J)) {
+      return false;
+    }
+
+    Eigen::MatrixXd basis = online_pca_.vectors();
+    if (basis.cols() < opts_.J || basis.rows() != static_cast<Eigen::Index>(dim()) ||
+        !basis.allFinite()) {
+      return false;
+    }
+
+    projection_basis_ = basis.leftCols(opts_.J);
+    for (Eigen::Index j = 0; j < projection_basis_.cols(); ++j) {
+      const double norm = projection_basis_.col(j).norm();
+      if (!std::isfinite(norm) || norm <= opts_.tol) {
+        projection_basis_ready_ = false;
+        return false;
+      }
+      projection_basis_.col(j) /= norm;
+    }
+    projection_basis_ready_ = true;
+    return true;
+  }
+
+  bool set_mean_direction_from_online_pca_(const bool whitened = false) {
+    if (opts_.J <= 0 || online_pca_.count() < static_cast<std::size_t>(opts_.J)) {
+      return false;
+    }
+
+    Eigen::MatrixXd basis = online_pca_.vectors();
+    Eigen::VectorXd weights = online_pca_.values();
+    if (basis.cols() < opts_.J ||
+        basis.rows() != static_cast<Eigen::Index>(dim()) ||
+        weights.size() < opts_.J ||
+        !basis.allFinite() ||
+        !weights.allFinite()) {
+      return false;
+    }
+
+    mean_direction_basis_ = basis.leftCols(opts_.J);
+    mean_direction_weights_ = weights.head(opts_.J).cwiseMax(opts_.tol);
+    for (Eigen::Index j = 0; j < mean_direction_basis_.cols(); ++j) {
+      const double norm = mean_direction_basis_.col(j).norm();
+      if (!std::isfinite(norm) || norm <= opts_.tol) {
+        mean_direction_ready_ = false;
+        mean_direction_whitened_ = false;
+        return false;
+      }
+      mean_direction_basis_.col(j) /= norm;
+    }
+    mean_direction_ready_ = true;
+    mean_direction_whitened_ = whitened;
+    return true;
+  }
+
+  void update_projected_moments_(const Eigen::VectorXd& theta) {
+    if (!projection_basis_ready_ || opts_.J <= 0 ||
+        projection_basis_.cols() != opts_.J ||
+        projection_basis_.rows() != theta.size()) {
+      return;
+    }
+
+    const Eigen::VectorXd projected = projection_basis_.transpose() * theta;
+    if (projected.allFinite()) {
+      projected_moments_.update(projected);
+    }
+  }
+
+  bool activate_projected_pair_() {
+    if (!projection_basis_ready_ || opts_.J <= 0 ||
+        projected_moments_.count() <= 2) {
+      return false;
+    }
+
+    Eigen::VectorXd variances = projected_moments_.variance();
+    if (variances.size() != opts_.J) {
+      return false;
+    }
+    for (Eigen::Index j = 0; j < variances.size(); ++j) {
+      if (!std::isfinite(variances(j)) || variances(j) <= opts_.tol) {
+        variances(j) = opts_.tol;
+      }
+    }
+
+    eigvecs_.leftCols(opts_.J) = projection_basis_;
+    eigvals_.head(opts_.J) = variances;
+    ++projected_pair_count_;
+    lowrank_ready_ = projected_pair_count_ >= 2;
+    return true;
+  }
+
+  void freeze_pca_for_final_calibration_() {
+    if (pca_frozen_) {
+      return;
+    }
+
+    const bool frozen = set_projection_basis_from_online_pca_();
+    (void) set_mean_direction_from_online_pca_();
+    if (!frozen && projected_pair_count_ > 0) {
+      projection_basis_ = eigvecs_.leftCols(opts_.J);
+      projection_basis_ready_ = projection_basis_.allFinite();
+    }
+
+    projected_moments_.reset();
+    online_pca_.reset();
+    pca_frozen_ = true;
+  }
+
+  void finalize_transport_handoff_() {
+    (void) set_mean_direction_from_online_pca_(true);
+    online_pca_.reset();
+  }
+
+  void adapt_transport_warmup_(const std::size_t adaptation_draw) {
+    if (adaptation_draw == 0 || adaptation_draw > opts_.warmup) {
+      return;
+    }
+    (void) windowed_adaptation_.window_closed(adaptation_draw);
+  }
+
   void adapt_warmup_(const Eigen::VectorXd& theta,
                      const std::size_t adaptation_draw) {
     if (adaptation_draw == 0 || adaptation_draw > opts_.warmup) {
       return;
     }
 
+    const bool calibrate_pca = pca_calibration_enabled_();
+    if (calibrate_pca && !pca_frozen_ &&
+        adaptation_draw >= pca_freeze_start_()) {
+      freeze_pca_for_final_calibration_();
+    }
+
     online_moments_.update(theta);
-    online_pca_.update(theta - mean_);
+    if (calibrate_pca) {
+      update_projected_moments_(theta);
+      if (!pca_frozen_) {
+        online_pca_.update(theta - mean_);
+      }
+    }
 
     if (windowed_adaptation_.window_closed(adaptation_draw)) {
       mean_ = online_moments_.mean();
       cov_ = online_moments_.variance();
       online_moments_.reset();
 
-      if (opts_.J > 0) {
-        eigvecs_.leftCols(opts_.J) = online_pca_.vectors();
-        eigvals_.head(opts_.J) = online_pca_.values();
+      if (calibrate_pca && !pca_frozen_) {
+        (void) activate_projected_pair_();
+        const bool has_next_basis = set_projection_basis_from_online_pca_();
+        (void) set_mean_direction_from_online_pca_();
+        projected_moments_.reset();
+        if (!has_next_basis) {
+          projection_basis_ready_ = false;
+        }
+        online_pca_.reset();
       }
-      online_pca_.reset();
+    }
+
+    if (calibrate_pca && pca_frozen_ &&
+        adaptation_draw == opts_.warmup) {
+      activate_projected_pair_();
     }
   }
 

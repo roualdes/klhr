@@ -27,6 +27,11 @@ int main(int argc, char** argv) {
   std::size_t num_iterations = 30'000;
   std::string model_name = "earnings";
   std::string sampler = "sas";
+  Eigen::Index direction_noise_rank = 2; // klhr::KlhrOptions{}.direction_noise_rank;
+  double direction_lowrank_weight = 1.0;
+  double direction_min_diag_fraction = 0.1;
+  bool lowrank_during_warmup = false;
+  double pca_freeze_fraction = klhr::KlhrOptions{}.pca_freeze_fraction;
   std::size_t initial_transport_steps = 150;
   std::size_t transport_max_reflections = 500;
   double transport_initial_distance = 1.0;
@@ -34,7 +39,7 @@ int main(int argc, char** argv) {
   double transport_max_distance = 1e6;
   double transport_max_logp_drop = 1000.0;
   double transport_direction_persistence = 0.9;
-  double transport_failure_direction_decay = 0.5;
+  double transport_failure_direction_decay = 0.25;
 
   {
     CLI::App app{"Run KLHR."};
@@ -59,6 +64,25 @@ int main(int argc, char** argv) {
 
     app.add_option("--sampler", sampler,
                    "Name of sampling algorithm to use");
+
+    app.add_option("--direction-noise-rank", direction_noise_rank,
+                   "Rank of learned PCA covariance used in regular direction noise (negative => J)")
+      ->default_val(direction_noise_rank);
+
+    app.add_option("--direction-lowrank-weight", direction_lowrank_weight,
+                   "Weight for learned low-rank covariance in regular direction noise")
+      ->default_val(direction_lowrank_weight);
+
+    app.add_option("--direction-min-diag-fraction", direction_min_diag_fraction,
+                   "Minimum retained fraction of componentwise variance in direction noise")
+      ->default_val(direction_min_diag_fraction);
+
+    app.add_flag("--lowrank-during-warmup", lowrank_during_warmup,
+                 "Use calibrated low-rank direction noise during warmup once available");
+
+    app.add_option("--pca-freeze-fraction", pca_freeze_fraction,
+                   "Fraction of the final adaptation window used to calibrate projected variances")
+      ->default_val(pca_freeze_fraction);
 
     app.add_option("--initial-transport-steps", initial_transport_steps,
                    "Initial nonstationary reflected-ray transport iterations")
@@ -104,6 +128,11 @@ int main(int argc, char** argv) {
   klhr::KlhrOptions options = {
     .seed = seed,
     .warmup = num_warmup,
+    .direction_noise_rank = direction_noise_rank,
+    .direction_lowrank_weight = direction_lowrank_weight,
+    .direction_min_diag_fraction = direction_min_diag_fraction,
+    .lowrank_during_warmup = lowrank_during_warmup,
+    .pca_freeze_fraction = pca_freeze_fraction,
     .initial_transport_steps = sampler == "sas" ? initial_transport_steps : 0,
     .transport_max_reflections = transport_max_reflections,
     .transport_initial_distance = transport_initial_distance,
@@ -140,6 +169,8 @@ int main(int argc, char** argv) {
     HighFive::File h5("draws/experiments.h5", HighFive::File::Truncate);
 
     h5.createGroup(model_name);
+    h5.createDataSet(std::format("{}/seed", model_name),
+                     std::to_string(algo.seed()));
     h5.createDataSet(std::format("{}/draws", model_name), draws);
     h5.createDataSet(std::format("{}/acceptance_rate", model_name), acceptance_rate);
     h5.createDataSet(std::format("{}/log_density", model_name), log_density);
@@ -207,6 +238,7 @@ int main(int argc, char** argv) {
       }
     }
 
+    std::cout << "Seed: " << algo.seed() << '\n';
     std::cout << "means: " << w.mean().transpose() << '\n';
     std::cout << "stds: " << w.std().transpose() << '\n';
     std::cout << "msjd: " << msjd.mean()(0) << '\n';
