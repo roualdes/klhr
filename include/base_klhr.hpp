@@ -51,6 +51,7 @@ struct KlhrOptions {
   double transport_max_distance = 1e6;
   double transport_max_logp_drop = 1000.0;
   double transport_max_segment_logp_drop = 1000.0;
+  double transport_max_endpoint_from_best_drop = 100.0;
   double transport_direction_persistence = 0.9;
   double transport_failure_direction_decay = 0.25;
 };
@@ -108,6 +109,8 @@ public:
     projection_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
     mean_direction_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
     mean_direction_weights_ = Eigen::VectorXd::Ones(opts_.J);
+    transport_handoff_pca_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
+    transport_handoff_pca_weights_ = Eigen::VectorXd::Zero(opts_.J);
     transport_mean_smooth_ = theta_;
     transport_cov_smooth_ = Eigen::VectorXd::Ones(D);
     transport_moments_.update(theta_);
@@ -119,6 +122,12 @@ public:
     acceptance_rate_ = 0.0;
     bsm_.log_density_gradient_noe(theta_, log_density_, grad_);
     ++nfev_;
+    transport_initial_theta_ = theta_;
+    transport_initial_grad_ = grad_;
+    transport_initial_log_density_ = log_density_;
+    transport_best_theta_ = theta_;
+    transport_best_grad_ = grad_;
+    transport_best_log_density_ = log_density_;
     draw_ = 0;
 
     if (!(transport_distance_ > opts_.transport_min_distance) ||
@@ -202,6 +211,42 @@ public:
 
   const std::vector<double>& transport_direction_norm_history() const {
     return transport_direction_norm_;
+  }
+
+  const Eigen::MatrixXd& transport_handoff_pca_basis() const {
+    return transport_handoff_pca_basis_;
+  }
+
+  const Eigen::VectorXd& transport_handoff_pca_weights() const {
+    return transport_handoff_pca_weights_;
+  }
+
+  std::size_t transport_handoff_pca_count() const {
+    return transport_handoff_pca_count_;
+  }
+
+  bool transport_handoff_pca_ready() const {
+    return transport_handoff_pca_ready_;
+  }
+
+  bool transport_handoff_pca_whitened() const {
+    return transport_handoff_pca_whitened_;
+  }
+
+  bool transport_rollback() const {
+    return transport_rollback_;
+  }
+
+  double transport_initial_log_density() const {
+    return transport_initial_log_density_;
+  }
+
+  double transport_best_log_density() const {
+    return transport_best_log_density_;
+  }
+
+  double transport_endpoint_from_best_drop() const {
+    return transport_endpoint_from_best_drop_;
   }
 
   Eigen::VectorXd random_direction() {
@@ -336,6 +381,13 @@ protected:
       std::clamp(options.transport_cov_shrink, 0.0, 1.0);
     options.transport_cov_ratio_cap =
       std::max(options.transport_cov_ratio_cap, 1.0);
+    if (std::isfinite(options.transport_max_endpoint_from_best_drop)) {
+      options.transport_max_endpoint_from_best_drop =
+        std::max(0.0, options.transport_max_endpoint_from_best_drop);
+    } else {
+      options.transport_max_endpoint_from_best_drop =
+        std::numeric_limits<double>::infinity();
+    }
     return options;
   }
 
@@ -364,6 +416,8 @@ protected:
   Eigen::MatrixXd projection_basis_;
   Eigen::MatrixXd mean_direction_basis_;
   Eigen::VectorXd mean_direction_weights_;
+  Eigen::MatrixXd transport_handoff_pca_basis_;
+  Eigen::VectorXd transport_handoff_pca_weights_;
   Eigen::VectorXd transport_mean_smooth_;
   Eigen::VectorXd transport_cov_smooth_;
   std::vector<Eigen::VectorXd> proposal_draws_;
@@ -380,13 +434,25 @@ protected:
   std::vector<Eigen::VectorXd> transport_variance_;
   Eigen::VectorXd grad_;
   Eigen::VectorXd transport_direction_state_;
+  Eigen::VectorXd transport_initial_theta_;
+  Eigen::VectorXd transport_initial_grad_;
+  Eigen::VectorXd transport_best_theta_;
+  Eigen::VectorXd transport_best_grad_;
   double transport_distance_;
+  double transport_initial_log_density_ = std::numeric_limits<double>::quiet_NaN();
+  double transport_best_log_density_ = std::numeric_limits<double>::quiet_NaN();
+  double transport_endpoint_from_best_drop_ =
+    std::numeric_limits<double>::quiet_NaN();
   bool projection_basis_ready_ = false;
   bool mean_direction_ready_ = false;
   bool mean_direction_whitened_ = false;
   bool pca_frozen_ = false;
   bool lowrank_ready_ = false;
+  bool transport_rollback_ = false;
   std::size_t projected_pair_count_ = 0;
+  std::size_t transport_handoff_pca_count_ = 0;
+  bool transport_handoff_pca_ready_ = false;
+  bool transport_handoff_pca_whitened_ = false;
 
   std::size_t draw_;
 
@@ -601,6 +667,7 @@ protected:
         proposal_log_density = nan_();
       } else {
         update_transport_covariance_(theta_);
+        update_best_transport_state_();
       }
     }
 
@@ -839,6 +906,78 @@ protected:
     transport_moved_.push_back(moved ? 1.0 : 0.0);
     transport_variance_.push_back(variance);
     transport_direction_norm_.push_back(transport_direction_state_.norm());
+  }
+
+  void update_best_transport_state_() {
+    if (!theta_.allFinite() || !grad_.allFinite() ||
+        !std::isfinite(log_density_)) {
+      return;
+    }
+    if (!std::isfinite(transport_best_log_density_) ||
+        log_density_ > transport_best_log_density_) {
+      transport_best_theta_ = theta_;
+      transport_best_grad_ = grad_;
+      transport_best_log_density_ = log_density_;
+    }
+  }
+
+  void reset_adaptation_to_defaults_(const bool advance_windows_to_current) {
+    const Eigen::Index D = static_cast<Eigen::Index>(dim());
+    mean_ = Eigen::VectorXd::Zero(D);
+    cov_ = Eigen::VectorXd::Ones(D);
+    eigvecs_ = Eigen::MatrixXd::Zero(D, opts_.J + 1);
+    eigvals_ = Eigen::VectorXd::Ones(opts_.J + 1);
+    projection_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
+    mean_direction_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
+    mean_direction_weights_ = Eigen::VectorXd::Ones(opts_.J);
+    transport_handoff_pca_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
+    transport_handoff_pca_weights_ = Eigen::VectorXd::Zero(opts_.J);
+    transport_mean_smooth_ = theta_;
+    transport_cov_smooth_ = Eigen::VectorXd::Ones(D);
+
+    online_moments_.reset();
+    transport_moments_.reset();
+    transport_moments_.update(theta_);
+    online_pca_.reset();
+    projected_moments_.reset();
+    windowed_adaptation_.reset();
+    if (advance_windows_to_current) {
+      for (std::size_t d = 1; d <= draw_; ++d) {
+        (void) windowed_adaptation_.window_closed(d);
+      }
+    }
+
+    projection_basis_ready_ = false;
+    mean_direction_ready_ = false;
+    mean_direction_whitened_ = false;
+    pca_frozen_ = false;
+    lowrank_ready_ = false;
+    projected_pair_count_ = 0;
+    transport_handoff_pca_count_ = 0;
+    transport_handoff_pca_ready_ = false;
+    transport_handoff_pca_whitened_ = false;
+
+    transport_distance_ = opts_.transport_initial_distance;
+    if (!(transport_distance_ > opts_.transport_min_distance) ||
+        !std::isfinite(transport_distance_)) {
+      transport_distance_ = 1.0;
+    }
+    transport_direction_state_ = normal_rng_(D);
+    regularize_transport_direction_();
+  }
+
+  void rollback_transport_to_initial_state_() {
+    if (transport_initial_theta_.size() == static_cast<Eigen::Index>(dim()) &&
+        transport_initial_grad_.size() == static_cast<Eigen::Index>(dim()) &&
+        transport_initial_theta_.allFinite() &&
+        transport_initial_grad_.allFinite() &&
+        std::isfinite(transport_initial_log_density_)) {
+      theta_ = transport_initial_theta_;
+      grad_ = transport_initial_grad_;
+      log_density_ = transport_initial_log_density_;
+    }
+    transport_rollback_ = true;
+    reset_adaptation_to_defaults_(true);
   }
 
   Eigen::VectorXd metric_scale_() {
@@ -1259,7 +1398,28 @@ protected:
   }
 
   void finalize_transport_handoff_() {
-    (void) set_mean_direction_from_online_pca_(true);
+    transport_endpoint_from_best_drop_ =
+      transport_best_log_density_ - log_density_;
+    if (std::isfinite(transport_endpoint_from_best_drop_) &&
+        transport_endpoint_from_best_drop_ >
+          opts_.transport_max_endpoint_from_best_drop) {
+      rollback_transport_to_initial_state_();
+      online_pca_.reset();
+      return;
+    }
+
+    transport_handoff_pca_count_ = online_pca_.count();
+    const bool ready = set_mean_direction_from_online_pca_(true);
+    transport_handoff_pca_ready_ = ready && mean_direction_ready_;
+    transport_handoff_pca_whitened_ =
+      transport_handoff_pca_ready_ && mean_direction_whitened_;
+    if (transport_handoff_pca_ready_) {
+      transport_handoff_pca_basis_ = mean_direction_basis_;
+      transport_handoff_pca_weights_ = mean_direction_weights_;
+    } else {
+      transport_handoff_pca_basis_.setZero();
+      transport_handoff_pca_weights_.setZero();
+    }
     online_pca_.reset();
   }
 

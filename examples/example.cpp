@@ -10,8 +10,8 @@
 
 #include <cstddef>
 #include <filesystem>
-#include <format>
 #include <iostream>
+#include <format>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -42,6 +42,8 @@ int main(int argc, char** argv) {
   double transport_max_logp_drop = 1000.0;
   double transport_max_segment_logp_drop =
     klhr::KlhrOptions{}.transport_max_segment_logp_drop;
+  double transport_max_endpoint_from_best_drop =
+    klhr::KlhrOptions{}.transport_max_endpoint_from_best_drop;
   double transport_direction_persistence = 0.9;
   double transport_failure_direction_decay = 0.25;
 
@@ -125,6 +127,11 @@ int main(int argc, char** argv) {
                    "Maximum allowed log-density drop for one reflected transport segment")
       ->default_val(transport_max_segment_logp_drop);
 
+    app.add_option("--transport-max-endpoint-from-best-drop",
+                   transport_max_endpoint_from_best_drop,
+                   "Maximum allowed final transport log-density drop from best transport state")
+      ->default_val(transport_max_endpoint_from_best_drop);
+
     app.add_option("--transport-direction-persistence",
                    transport_direction_persistence,
                    "Partial direction refresh persistence for initial transport")
@@ -156,6 +163,8 @@ int main(int argc, char** argv) {
     .transport_max_distance = transport_max_distance,
     .transport_max_logp_drop = transport_max_logp_drop,
     .transport_max_segment_logp_drop = transport_max_segment_logp_drop,
+    .transport_max_endpoint_from_best_drop =
+      transport_max_endpoint_from_best_drop,
     .transport_direction_persistence = transport_direction_persistence,
     .transport_failure_direction_decay = transport_failure_direction_decay,
   };
@@ -235,6 +244,24 @@ int main(int argc, char** argv) {
                        vector_to_eigen(algo.transport_direction_norm_history()));
       h5.createDataSet(std::format("{}/transport_variance", model_name),
                        vector_to_matrix(algo.transport_variance_history()));
+      h5.createDataSet(std::format("{}/transport_handoff_pca_basis", model_name),
+                       algo.transport_handoff_pca_basis());
+      h5.createDataSet(std::format("{}/transport_handoff_pca_weights", model_name),
+                       algo.transport_handoff_pca_weights());
+      h5.createDataSet(std::format("{}/transport_handoff_pca_count", model_name),
+                       static_cast<double>(algo.transport_handoff_pca_count()));
+      h5.createDataSet(std::format("{}/transport_handoff_pca_ready", model_name),
+                       algo.transport_handoff_pca_ready() ? 1.0 : 0.0);
+      h5.createDataSet(std::format("{}/transport_handoff_pca_whitened", model_name),
+                       algo.transport_handoff_pca_whitened() ? 1.0 : 0.0);
+      h5.createDataSet(std::format("{}/transport_rollback", model_name),
+                       algo.transport_rollback() ? 1.0 : 0.0);
+      h5.createDataSet(std::format("{}/transport_initial_log_density", model_name),
+                       algo.transport_initial_log_density());
+      h5.createDataSet(std::format("{}/transport_best_log_density", model_name),
+                       algo.transport_best_log_density());
+      h5.createDataSet(std::format("{}/transport_endpoint_from_best_drop", model_name),
+                       algo.transport_endpoint_from_best_drop());
     }
 
     if constexpr (std::is_same_v<Algo, klhr::SASKLHR>) {

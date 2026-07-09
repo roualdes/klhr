@@ -77,13 +77,38 @@ def earnings(tbl, model):
 
 def funnel(tbl, model):
     draws = np.asarray(tbl["draws"])
-    idx = np.arange(np.shape(draws)[0]) + 1
+    M = np.shape(draws)[0]
+    warmup = M // 2
+    idx = np.arange(warmup) + 1
     plt.clf()
-    plt.plot(idx, draws[:, 0])
+    plt.plot(idx, draws[warmup:, 0])
     plt.tight_layout()
     plt.savefig(f"draws/{model}_trace_plot.png")
     plt.close()
-    scatter_plot(draws[:, 1], draws[:, 0], f"draws/{model}_scatter_plot.png")
+    scatter_plot(draws[warmup:, 1], draws[warmup:, 0], f"draws/{model}_scatter_plot.png")
+
+def ssp3nc3r(tbl, model):
+    draws = np.asarray(tbl["draws"])
+    M = np.shape(draws)[0]
+    warmup = M // 2
+    idx = np.arange(warmup) + 1
+
+    plt.clf()
+    fig = plt.figure(figsize = (14, 9))
+    gs = fig.add_gridspec(3, 1)
+
+    axs = np.empty(3, dtype = object)
+    axs[0] = fig.add_subplot(gs[0])
+    axs[1] = fig.add_subplot(gs[1])
+    axs[2] = fig.add_subplot(gs[2])
+
+    axs[0].plot(idx, draws[warmup:, 0])
+    axs[1].plot(idx, draws[warmup:, 1])
+    axs[2].plot(idx, draws[warmup:, 2])
+
+    plt.tight_layout()
+    plt.savefig(f"draws/{model}_trace_plot.png")
+    plt.close()
 
 def main():
     parser = argparse.ArgumentParser()
@@ -97,6 +122,8 @@ def main():
             earnings(tbl, model)
         elif model == "funnel":
             funnel(tbl, model)
+        elif model == "ssp3nc3r":
+            ssp3nc3r(tbl, model)
         else:
             print(f"don't know model {model}")
 
