@@ -75,6 +75,11 @@ def earnings(tbl, model):
 
     scatter_plot(draws[:, 0], draws[:, 1], f"draws/{model}_scatter_plot.png")
 
+    if "sas_location" in tbl:
+        eta_sas(tbl, model)
+    else:
+        eta_normal(tbl, model)
+
 def funnel(tbl, model):
     draws = np.asarray(tbl["draws"])
     M = np.shape(draws)[0]
@@ -86,6 +91,62 @@ def funnel(tbl, model):
     plt.savefig(f"draws/{model}_trace_plot.png")
     plt.close()
     scatter_plot(draws[warmup:, 1], draws[warmup:, 0], f"draws/{model}_scatter_plot.png")
+
+def eta_sas(tbl, model):
+    m = np.asarray(tbl["sas_location"])
+    s = np.asarray(tbl["sas_scale"])
+    e = np.asarray(tbl["sas_skew"])
+    M = np.shape(m)[0]
+    warmup = M // 2
+    idx = np.arange(warmup) + 1
+
+    plt.clf()
+    fig = plt.figure(figsize = (14, 9))
+    gs = fig.add_gridspec(3, 1)
+
+    axs = np.empty(3, dtype = object)
+    axs[0] = fig.add_subplot(gs[0])
+    axs[1] = fig.add_subplot(gs[1])
+    axs[2] = fig.add_subplot(gs[2])
+
+    axs[0].plot(idx, m[warmup:])
+    axs[0].set_ylabel("m")
+
+    axs[1].plot(idx, s[warmup:])
+    axs[1].set_ylabel("s")
+
+    axs[2].plot(idx, e[warmup:])
+    axs[2].set_ylabel("e")
+
+    plt.tight_layout()
+    plt.savefig(f"draws/{model}_eta_trace_plot.png")
+    plt.close()
+
+def eta_normal(tbl, model):
+    m = np.asarray(tbl["normal_mean"])
+    s = np.asarray(tbl["normal_standard_deviation"])
+    M = np.shape(m)[0]
+    warmup = M // 2
+    idx = np.arange(warmup) + 1
+
+    plt.clf()
+    fig = plt.figure(figsize = (14, 9))
+    gs = fig.add_gridspec(2, 1)
+
+    axs = np.empty(2, dtype = object)
+    axs[0] = fig.add_subplot(gs[0])
+    axs[1] = fig.add_subplot(gs[1])
+
+    axs[0].plot(idx, m[warmup:])
+    axs[0].set_ylabel("m")
+
+    axs[1].plot(idx, s[warmup:])
+    axs[1].set_ylabel("s")
+
+    plt.tight_layout()
+    plt.savefig(f"draws/{model}_eta_trace_plot.png")
+    plt.close()
+
 
 def ssp3nc3r(tbl, model):
     draws = np.asarray(tbl["draws"])
@@ -110,6 +171,12 @@ def ssp3nc3r(tbl, model):
     plt.savefig(f"draws/{model}_trace_plot.png")
     plt.close()
 
+    if "sas_location" in tbl:
+        eta_sas(tbl, model)
+    else:
+        eta_normal(tbl, model)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="earnings")
@@ -122,7 +189,7 @@ def main():
             earnings(tbl, model)
         elif model == "funnel":
             funnel(tbl, model)
-        elif model == "ssp3nc3r":
+        elif model == "ssp3nc3r" or model == "ssp3nc3r_2":
             ssp3nc3r(tbl, model)
         else:
             print(f"don't know model {model}")

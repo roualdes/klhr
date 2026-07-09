@@ -265,6 +265,12 @@ int main(int argc, char** argv) {
     }
 
     if constexpr (std::is_same_v<Algo, klhr::SASKLHR>) {
+      h5.createDataSet(std::format("{}/sas_location", model_name),
+                       vector_to_eigen(algo.sas_location_history()));
+      h5.createDataSet(std::format("{}/sas_scale", model_name),
+                       vector_to_eigen(algo.sas_scale_history()));
+      h5.createDataSet(std::format("{}/sas_skew", model_name),
+                       vector_to_eigen(algo.sas_skew_history()));
       h5.createDataSet(std::format("{}/sas_m", model_name),
                        vector_to_eigen(algo.sas_m_history()));
       h5.createDataSet(std::format("{}/sas_sampled_xi", model_name),
@@ -273,6 +279,14 @@ int main(int argc, char** argv) {
                        vector_to_eigen(algo.sas_accepted_xi_history()));
       h5.createDataSet(std::format("{}/sas_accepted", model_name),
                        vector_to_eigen(algo.sas_accepted_history()));
+    }
+
+    if constexpr (std::is_same_v<Algo, klhr::NormalKLHR>) {
+      h5.createDataSet(std::format("{}/normal_mean", model_name),
+                       vector_to_eigen(algo.normal_mean_history()));
+      h5.createDataSet(
+        std::format("{}/normal_standard_deviation", model_name),
+        vector_to_eigen(algo.normal_standard_deviation_history()));
     }
 
     mcmcpp::WelfordAccumulator msjd{};

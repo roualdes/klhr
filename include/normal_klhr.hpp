@@ -4,7 +4,9 @@
 #include "bfgs.hpp"
 #include "normal_quantile.hpp"
 
+#include <limits>
 #include <utility>
+#include <vector>
 
 namespace klhr {
 
@@ -12,7 +14,29 @@ class NormalKLHR : public BaseKLHR {
 public:
   using BaseKLHR::BaseKLHR;
 
+  const std::vector<double>& normal_mean_history() const {
+    return normal_mean_;
+  }
+
+  const std::vector<double>& normal_standard_deviation_history() const {
+    return normal_standard_deviation_;
+  }
+
 protected:
+  void record_kl_step_(const Eigen::VectorXd& eta, const double xi,
+                       const bool accepted) override {
+    (void) xi;
+    (void) accepted;
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const bool valid_eta = eta.size() >= 2 && eta.allFinite();
+    const double sigma = valid_eta ? scale_from_log_(eta(1)) : nan;
+
+    normal_mean_.push_back(valid_eta ? eta(0) : nan);
+    normal_standard_deviation_.push_back(
+      std::isfinite(sigma) ? sigma : nan);
+  }
+
   Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
                             const Eigen::VectorXd& rho) override {
     const LineModeEstimate mode = fit_line_mode_(center, rho);
@@ -134,6 +158,8 @@ protected:
     return {mu, sigma};
   }
 
+  std::vector<double> normal_mean_;
+  std::vector<double> normal_standard_deviation_;
 };
 
 } // namespace klhr

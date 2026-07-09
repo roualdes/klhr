@@ -3,7 +3,7 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 
-model_name = "ssp3nc3r"
+model_name = "ssp3nc3r_2"
 model = csp.CmdStanModel(stan_file=f"./stan/{model_name}.stan")
 start = time.perf_counter()
 fit = model.sample(data=f"./stan/{model_name}.json",

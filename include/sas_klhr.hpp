@@ -18,8 +18,20 @@ public:
           const KlhrOptions& options = KlhrOptions{}) :
     BaseKLHR(stan_file, json_file, options) {}
 
+  const std::vector<double>& sas_location_history() const {
+    return sas_location_;
+  }
+
+  const std::vector<double>& sas_scale_history() const {
+    return sas_scale_;
+  }
+
+  const std::vector<double>& sas_skew_history() const {
+    return sas_skew_;
+  }
+
   const std::vector<double>& sas_m_history() const {
-    return sas_m_;
+    return sas_location_;
   }
 
   const std::vector<double>& sas_xi_history() const {
@@ -40,8 +52,11 @@ protected:
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const bool valid_eta = eta.size() >= 3 && eta.allFinite();
     const bool valid_xi = std::isfinite(xi);
+    const double scale = valid_eta ? scale_from_log_(eta(1)) : nan;
 
-    sas_m_.push_back(valid_eta ? eta(0) : nan);
+    sas_location_.push_back(valid_eta ? eta(0) : nan);
+    sas_scale_.push_back(std::isfinite(scale) ? scale : nan);
+    sas_skew_.push_back(valid_eta ? eta(2) : nan);
     sas_xi_.push_back(valid_xi ? xi : nan);
     sas_accepted_xi_.push_back(accepted && valid_xi ? xi : nan);
     sas_accepted_.push_back(accepted ? 1.0 : 0.0);
@@ -238,7 +253,9 @@ protected:
     return 5.0;
   }
 
-  std::vector<double> sas_m_;
+  std::vector<double> sas_location_;
+  std::vector<double> sas_scale_;
+  std::vector<double> sas_skew_;
   std::vector<double> sas_xi_;
   std::vector<double> sas_accepted_xi_;
   std::vector<double> sas_accepted_;
