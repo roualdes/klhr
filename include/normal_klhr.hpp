@@ -11,34 +11,17 @@ namespace klhr {
 class NormalKLHR : public BaseKLHR {
 public:
   using BaseKLHR::BaseKLHR;
+
 protected:
-    Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
-                          const Eigen::VectorXd& rho) override {
-    Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1);
-    Eigen::VectorXd grad = Eigen::VectorXd::Zero(dim());
-    auto fg = [&, this](const Eigen::VectorXd& x,
-                        double& value, Eigen::VectorXd& g) {
-      g.resize(1);
-      bsm_.log_density_gradient_noe(x(0) * rho + center, value, grad);
-      value = -value;
-      g(0) = -grad.dot(rho);
-    };
-
-    bfgs::BfgsResult mode = bfgs::bfgs(fg, mode_init);
-    nfev_ += mode.nfev;
-
-    double log_s0 = 0.0;
-    const double h = mode.hess_inv(0, 0);
-    if (std::isfinite(h) && h > 0.0) {
-      log_s0 = 0.5 * std::log(h * 1.1);
-    }
-
+  Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
+                            const Eigen::VectorXd& rho) override {
+    const LineModeEstimate mode = fit_line_mode_(center, rho);
     Eigen::VectorXd init(2);
-    init << mode.x(0), 0.0;
+    init << mode.mode, 0.0;
 
     auto kl = [&, this](const Eigen::VectorXd& eta,
                         double& value, Eigen::VectorXd& grad) {
-      KL_(eta, center, rho, log_s0, value, grad);
+      KL_(eta, center, rho, mode.log_scale, value, grad);
     };
     bfgs::BfgsResult o =
       bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
@@ -48,7 +31,7 @@ protected:
     const Eigen::VectorXd raw =
       o.x.size() == 2 && o.x.allFinite() ? o.x : init;
     Eigen::VectorXd out(2);
-    out << raw(0), relative_log_scale_(raw(1), log_s0);
+    out << raw(0), relative_log_scale_(raw(1), mode.log_scale);
     return out;
   }
 
@@ -151,48 +134,6 @@ protected:
     return {mu, sigma};
   }
 
-  void set_bad_kl_(const Eigen::VectorXd& eta, double& value,
-                   Eigen::VectorXd& grad) const {
-    value = bad_kl_value_();
-    grad = Eigen::VectorXd::Zero(eta.size());
-    if (eta.size() > 1 && std::isfinite(eta(1))) {
-      grad(1) = eta(1);
-    }
-  }
-
-  static constexpr double bad_kl_value_() {
-    return 1e100;
-  }
-
-  double relative_log_scale_(const double raw, const double log_s0) const {
-    const double r = log_scale_radius_();
-    if (!std::isfinite(raw)) {
-      return log_s0;
-    }
-    return log_s0 + r * std::tanh(raw / r);
-  }
-
-  double relative_log_scale_derivative_(const double raw) const {
-    const double r = log_scale_radius_();
-    if (!std::isfinite(raw)) {
-      return 0.0;
-    }
-    const double th = std::tanh(raw / r);
-    return 1.0 - th * th;
-  }
-
-  double scale_from_log_(double log_s) const {
-    if (!std::isfinite(log_s)) {
-      log_s = 0.0;
-    }
-    const double max_log = std::log(std::numeric_limits<double>::max()) - 2.0;
-    const double min_log = std::log(std::numeric_limits<double>::min()) + 2.0;
-    return std::exp(std::clamp(log_s, min_log, max_log)) + opts_.tol;
-  }
-
-  static constexpr double log_scale_radius_() {
-    return 4.6051701859880918; // log(100)
-  }
 };
 
 } // namespace klhr

@@ -27,10 +27,12 @@ int main(int argc, char** argv) {
   std::size_t num_iterations = 30'000;
   std::string model_name = "earnings";
   std::string sampler = "sas";
-  Eigen::Index direction_noise_rank = 2; // klhr::KlhrOptions{}.direction_noise_rank;
-  double direction_lowrank_weight = 1.0;
-  double direction_min_diag_fraction = 0.1;
-  bool lowrank_during_warmup = false;
+  Eigen::Index pca_basis = klhr::KlhrOptions{}.J;
+  Eigen::Index direction_noise_rank = klhr::KlhrOptions{}.direction_noise_rank;
+  double direction_lowrank_weight = klhr::KlhrOptions{}.direction_lowrank_weight;
+  double direction_min_diag_fraction =
+    klhr::KlhrOptions{}.direction_min_diag_fraction;
+  bool lowrank_during_warmup = klhr::KlhrOptions{}.lowrank_during_warmup;
   double pca_freeze_fraction = klhr::KlhrOptions{}.pca_freeze_fraction;
   std::size_t initial_transport_steps = 150;
   std::size_t transport_max_reflections = 500;
@@ -38,6 +40,8 @@ int main(int argc, char** argv) {
   double transport_min_distance = 1e-8;
   double transport_max_distance = 1e6;
   double transport_max_logp_drop = 1000.0;
+  double transport_max_segment_logp_drop =
+    klhr::KlhrOptions{}.transport_max_segment_logp_drop;
   double transport_direction_persistence = 0.9;
   double transport_failure_direction_decay = 0.25;
 
@@ -65,6 +69,10 @@ int main(int argc, char** argv) {
     app.add_option("--sampler", sampler,
                    "Name of sampling algorithm to use");
 
+    app.add_option("--pca-basis", pca_basis,
+                   "Number of PCA basis vectors to learn")
+      ->default_val(pca_basis);
+
     app.add_option("--direction-noise-rank", direction_noise_rank,
                    "Rank of learned PCA covariance used in regular direction noise (negative => J)")
       ->default_val(direction_noise_rank);
@@ -77,8 +85,10 @@ int main(int argc, char** argv) {
                    "Minimum retained fraction of componentwise variance in direction noise")
       ->default_val(direction_min_diag_fraction);
 
-    app.add_flag("--lowrank-during-warmup", lowrank_during_warmup,
-                 "Use calibrated low-rank direction noise during warmup once available");
+    app.add_flag("--lowrank-during-warmup,!--no-lowrank-during-warmup",
+                 lowrank_during_warmup,
+                 "Use calibrated low-rank direction noise during warmup once available")
+      ->default_val(lowrank_during_warmup);
 
     app.add_option("--pca-freeze-fraction", pca_freeze_fraction,
                    "Fraction of the final adaptation window used to calibrate projected variances")
@@ -110,6 +120,11 @@ int main(int argc, char** argv) {
                    "Maximum allowed log-density drop during reflected transport")
       ->default_val(transport_max_logp_drop);
 
+    app.add_option("--transport-max-segment-logp-drop",
+                   transport_max_segment_logp_drop,
+                   "Maximum allowed log-density drop for one reflected transport segment")
+      ->default_val(transport_max_segment_logp_drop);
+
     app.add_option("--transport-direction-persistence",
                    transport_direction_persistence,
                    "Partial direction refresh persistence for initial transport")
@@ -128,17 +143,19 @@ int main(int argc, char** argv) {
   klhr::KlhrOptions options = {
     .seed = seed,
     .warmup = num_warmup,
+    .J = pca_basis,
     .direction_noise_rank = direction_noise_rank,
     .direction_lowrank_weight = direction_lowrank_weight,
     .direction_min_diag_fraction = direction_min_diag_fraction,
     .lowrank_during_warmup = lowrank_during_warmup,
     .pca_freeze_fraction = pca_freeze_fraction,
-    .initial_transport_steps = sampler == "sas" ? initial_transport_steps : 0,
+    .initial_transport_steps = initial_transport_steps,
     .transport_max_reflections = transport_max_reflections,
     .transport_initial_distance = transport_initial_distance,
     .transport_min_distance = transport_min_distance,
     .transport_max_distance = transport_max_distance,
     .transport_max_logp_drop = transport_max_logp_drop,
+    .transport_max_segment_logp_drop = transport_max_segment_logp_drop,
     .transport_direction_persistence = transport_direction_persistence,
     .transport_failure_direction_decay = transport_failure_direction_decay,
   };

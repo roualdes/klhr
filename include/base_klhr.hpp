@@ -1,6 +1,8 @@
 #pragma once
 
+#include "bfgs.hpp"
 #include "gausshermite.hpp"
+#include "gausslaguerre.hpp"
 #include "onlinepca.hpp"
 
 #include <Eigen/Dense>
@@ -17,6 +19,7 @@
 #include <numbers>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace klhr {
@@ -32,23 +35,24 @@ struct KlhrOptions {
   std::size_t warmup = 1'000;
   std::size_t windowsize = 50;
   std::size_t windowscale = 2;
-  Eigen::Index J = 6;
-  Eigen::Index direction_noise_rank = -1;
-  double direction_lowrank_weight = 0.5;
+  Eigen::Index J = 1;
+  Eigen::Index direction_noise_rank = 1;
+  double direction_lowrank_weight = 1.0;
   double direction_min_diag_fraction = 0.1;
-  bool lowrank_during_warmup = false;
+  bool lowrank_during_warmup = true;
   double pca_freeze_fraction = 0.1;
   double transport_cov_shrink = 0.25;
   double transport_cov_ratio_cap = 4.0;
   double l = 0.0;
-  std::size_t initial_transport_steps = 0;
-  std::size_t transport_max_reflections = 128;
+  std::size_t initial_transport_steps = 150;
+  std::size_t transport_max_reflections = 500;
   double transport_initial_distance = 1.0;
   double transport_min_distance = 1e-8;
   double transport_max_distance = 1e6;
   double transport_max_logp_drop = 1000.0;
+  double transport_max_segment_logp_drop = 1000.0;
   double transport_direction_persistence = 0.9;
-  double transport_failure_direction_decay = 0.5;
+  double transport_failure_direction_decay = 0.25;
 };
 
 class BaseKLHR {
@@ -94,6 +98,7 @@ public:
     gauss_hermite(opts_.N, w_, x_);
     x_ *= std::sqrt(2.0);
     w_ /= std::sqrt(std::numbers::pi);
+    gauss_laguerre(opts_.N, laguerre_w_, laguerre_x_);
 
     const Eigen::Index D = dim();
     mean_ = Eigen::VectorXd::Zero(D);
@@ -228,14 +233,55 @@ protected:
 
   virtual Eigen::VectorXd fit_transport_ray_(const Eigen::VectorXd& center,
                                              const Eigen::VectorXd& rho) {
-    (void) center;
-    (void) rho;
-    return Eigen::VectorXd::Constant(2, nan_());
+    double distance0 = transport_distance_;
+    if (!(distance0 > opts_.transport_min_distance) ||
+        !std::isfinite(distance0)) {
+      distance0 = opts_.transport_initial_distance;
+    }
+    if (!(distance0 > opts_.transport_min_distance) ||
+        !std::isfinite(distance0)) {
+      distance0 = 1.0;
+    }
+    distance0 = std::clamp(distance0, opts_.transport_min_distance,
+                           opts_.transport_max_distance);
+    const double log_scale0 = std::log(distance0);
+
+    Eigen::VectorXd init(2);
+    init << 0.0, 0.0;
+    auto kl = [&, this](const Eigen::VectorXd& eta,
+                        double& value, Eigen::VectorXd& grad) {
+      transport_weibull_KL_(eta, center, rho, log_scale0, value, grad);
+    };
+    bfgs::BfgsResult o =
+      bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
+                            .xrtol = opts_.gtol,
+                            .maxiter_bfgs = 4});
+    nfev_ += o.nfev * static_cast<std::size_t>(laguerre_x_.size());
+
+    const Eigen::VectorXd raw =
+      o.x.size() == 2 && o.x.allFinite() ? o.x : init;
+    Eigen::VectorXd out(2);
+    out << bounded_log_shape_(raw(0)),
+      relative_log_scale_(raw(1), log_scale0);
+    return out;
   }
 
   virtual double transport_distance_proposal_(const Eigen::VectorXd& eta) {
-    (void) eta;
-    return nan_();
+    if (eta.size() < 2 || !eta.allFinite()) {
+      return nan_();
+    }
+    auto [shape, scale] = unpack_weibull_(eta);
+    if (!(shape > 0.0) || !(scale > 0.0) ||
+        !std::isfinite(shape) || !std::isfinite(scale)) {
+      return nan_();
+    }
+    const double u = clamp_probability_(std_uniform_(rng_));
+    const double x = -std::log1p(-u);
+    const double distance = scale * std::pow(x, 1.0 / shape);
+    if (!(distance > 0.0) || !std::isfinite(distance)) {
+      return nan_();
+    }
+    return distance;
   }
 
   virtual void record_kl_step_(const Eigen::VectorXd& eta, const double xi,
@@ -243,6 +289,35 @@ protected:
     (void) eta;
     (void) xi;
     (void) accepted;
+  }
+
+  struct LineModeEstimate {
+    double mode = 0.0;
+    double log_scale = 0.0;
+  };
+
+  LineModeEstimate fit_line_mode_(const Eigen::VectorXd& center,
+                                  const Eigen::VectorXd& rho) {
+    Eigen::VectorXd mode_init = Eigen::VectorXd::Zero(1);
+    Eigen::VectorXd target_grad = Eigen::VectorXd::Zero(dim());
+    auto fg = [&, this](const Eigen::VectorXd& x,
+                        double& value, Eigen::VectorXd& g) {
+      g.resize(1);
+      bsm_.log_density_gradient_noe(x(0) * rho + center, value, target_grad);
+      value = -value;
+      g(0) = -target_grad.dot(rho);
+    };
+
+    bfgs::BfgsResult mode = bfgs::bfgs(fg, mode_init);
+    nfev_ += mode.nfev;
+
+    LineModeEstimate out;
+    out.mode = mode.x(0);
+    const double h = mode.hess_inv(0, 0);
+    if (std::isfinite(h) && h > 0.0) {
+      out.log_scale = 0.5 * std::log(h * 1.1);
+    }
+    return out;
   }
 
   static KlhrOptions normalized_options_(KlhrOptions options,
@@ -280,6 +355,8 @@ protected:
   Eigen::VectorXd theta_;
   Eigen::VectorXd x_; // Gauss-Hermite sample points
   Eigen::VectorXd w_; // and weights
+  Eigen::VectorXd laguerre_x_; // Gauss-Laguerre sample points
+  Eigen::VectorXd laguerre_w_; // and weights
   Eigen::VectorXd mean_;
   Eigen::VectorXd cov_;
   Eigen::MatrixXd eigvecs_;
@@ -473,14 +550,18 @@ protected:
         break;
       }
 
+      if (current.log_density - next.log_density >
+          std::abs(opts_.transport_max_segment_logp_drop)) {
+        break;
+      }
+
       const Eigen::VectorXd delta = next.theta - theta0;
-      Eigen::VectorXd scaled_delta = delta.array() / scale.array();
-      if (!scaled_delta.allFinite()) {
+      if (!delta.allFinite()) {
         failed = true;
         break;
       }
-      const double turning = scaled_delta.dot(direction);
-      const double initial_turning = scaled_delta.dot(direction0);
+      const double turning = delta.dot(direction);
+      const double initial_turning = delta.dot(direction0);
       if (!std::isfinite(turning) || !std::isfinite(initial_turning) ||
           turning <= 0.0 || initial_turning <= 0.0) {
         uturn = true;
@@ -558,6 +639,84 @@ protected:
 
     out.valid = true;
     return out;
+  }
+
+  void transport_weibull_KL_(const Eigen::VectorXd& eta,
+                             const Eigen::VectorXd& center,
+                             const Eigen::VectorXd& rho,
+                             const double log_scale0,
+                             double& value,
+                             Eigen::VectorXd& grad) {
+    const double log_shape = bounded_log_shape_(eta(0));
+    const double dlog_shape = bounded_log_shape_derivative_(eta(0));
+    const double shape = scale_from_log_(log_shape);
+    const double log_scale = relative_log_scale_(eta(1), log_scale0);
+    const double dlog_scale = relative_log_scale_derivative_(eta(1));
+    const double scale = scale_from_log_(log_scale);
+    if (!std::isfinite(log_shape) || !std::isfinite(dlog_shape) ||
+        !std::isfinite(shape) || !std::isfinite(log_scale) ||
+        !std::isfinite(dlog_scale) || !std::isfinite(scale) ||
+        !center.allFinite() || !rho.allFinite()) {
+      set_bad_kl_(eta, value, grad);
+      return;
+    }
+
+    value = 0.0;
+    grad = Eigen::VectorXd::Zero(2);
+
+    Eigen::Index D = dim();
+    Eigen::VectorXd xi(D);
+    Eigen::VectorXd grad_logp(D);
+    const double inv_shape = 1.0 / shape;
+    for (Eigen::Index n = 0; n < laguerre_x_.size(); ++n) {
+      const double xn = laguerre_x_(n);
+      const double wn = laguerre_w_(n);
+      if (!(xn > 0.0) || !std::isfinite(xn) || !std::isfinite(wn)) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
+
+      const double log_x = std::log(xn);
+      const double x_power =
+        std::exp(std::clamp(inv_shape * log_x, -700.0, 700.0));
+      const double distance = scale * x_power;
+      xi = center + distance * rho;
+      if (!(distance > 0.0) || !std::isfinite(distance) || !xi.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
+
+      double logp;
+      bsm_.log_density_gradient_noe(xi, logp, grad_logp);
+      if (!std::isfinite(logp) || !grad_logp.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
+      grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
+      if (!grad_logp.allFinite()) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
+
+      const double line_grad = grad_logp.dot(rho);
+      if (!std::isfinite(line_grad)) {
+        set_bad_kl_(eta, value, grad);
+        return;
+      }
+
+      const double log_q =
+        log_shape - log_scale + (1.0 - inv_shape) * log_x - xn;
+      value += wn * (log_q - logp);
+
+      const double d_distance_d_log_shape = -distance * log_x * inv_shape;
+      const double d_distance_d_log_scale = distance;
+      grad(0) += wn * (1.0 + inv_shape * log_x -
+                       line_grad * d_distance_d_log_shape);
+      grad(1) += wn * (-1.0 - line_grad * d_distance_d_log_scale);
+    }
+
+    grad(0) *= dlog_shape;
+    grad(1) *= dlog_scale;
   }
 
   Eigen::VectorXd reflected_transport_direction_(
@@ -1152,6 +1311,76 @@ protected:
         adaptation_draw == opts_.warmup) {
       activate_projected_pair_();
     }
+  }
+
+  std::pair<double, double> unpack_weibull_(const Eigen::VectorXd& eta) {
+    const double shape = scale_from_log_(eta(0));
+    const double scale = scale_from_log_(eta(1));
+    return {shape, scale};
+  }
+
+  void set_bad_kl_(const Eigen::VectorXd& eta, double& value,
+                   Eigen::VectorXd& grad) const {
+    value = bad_kl_value_();
+    grad = Eigen::VectorXd::Zero(eta.size());
+    if (eta.size() > 1 && std::isfinite(eta(1))) {
+      grad(1) = eta(1);
+    }
+  }
+
+  static constexpr double bad_kl_value_() {
+    return 1e100;
+  }
+
+  double relative_log_scale_(const double raw, const double log_s0) const {
+    const double r = log_scale_radius_();
+    if (!std::isfinite(raw)) {
+      return log_s0;
+    }
+    return log_s0 + r * std::tanh(raw / r);
+  }
+
+  double relative_log_scale_derivative_(const double raw) const {
+    const double r = log_scale_radius_();
+    if (!std::isfinite(raw)) {
+      return 0.0;
+    }
+    const double th = std::tanh(raw / r);
+    return 1.0 - th * th;
+  }
+
+  double scale_from_log_(double log_s) const {
+    if (!std::isfinite(log_s)) {
+      log_s = 0.0;
+    }
+    const double max_log = std::log(std::numeric_limits<double>::max()) - 2.0;
+    const double min_log = std::log(std::numeric_limits<double>::min()) + 2.0;
+    return std::exp(std::clamp(log_s, min_log, max_log)) + opts_.tol;
+  }
+
+  double bounded_log_shape_(const double raw) const {
+    const double r = weibull_log_shape_radius_();
+    if (!std::isfinite(raw)) {
+      return 0.0;
+    }
+    return r * std::tanh(raw / r);
+  }
+
+  double bounded_log_shape_derivative_(const double raw) const {
+    const double r = weibull_log_shape_radius_();
+    if (!std::isfinite(raw)) {
+      return 0.0;
+    }
+    const double th = std::tanh(raw / r);
+    return 1.0 - th * th;
+  }
+
+  static constexpr double log_scale_radius_() {
+    return 4.6051701859880918; // log(100)
+  }
+
+  static constexpr double weibull_log_shape_radius_() {
+    return 2.3025850929940457; // log(10)
   }
 
   double overrelaxed_proposal_impl_(double u) {

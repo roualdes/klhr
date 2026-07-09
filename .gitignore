@@ -224,3 +224,4 @@ experiments.txt
 experiments.db
 experiments/run_stan.py
 *.h5
+draws/*.csv
