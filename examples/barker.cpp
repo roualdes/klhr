@@ -1,21 +1,13 @@
 #include "barker.hpp"
-#include "welford.hpp"
 
 #include <CLI/CLI.hpp>
 #include <Eigen/Dense>
-#include <highfive/highfive.hpp>
-#include <highfive/eigen.hpp>
 
 #include <cstddef>
-#include <filesystem>
+#include <cstdint>
 #include <format>
 #include <iostream>
-#include <memory>
-#include <stdexcept>
 #include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 int main(int argc, char** argv) {
 
@@ -58,36 +50,12 @@ int main(int argc, char** argv) {
 
   klhr::Barker algo(model, data, options);
 
-  Eigen::Index D = algo.dim();
-  mcmcpp::WelfordAccumulator w{D};
-
-  Eigen::MatrixXd draws(num_iterations, D);
-  Eigen::VectorXd acceptance_rate(num_iterations);
-  Eigen::VectorXd log_density(num_iterations);
-  Eigen::VectorXd nfev(num_iterations);
-
-  Eigen::VectorXd draw(D);
+  Eigen::VectorXd draw;
   for (std::size_t n = 0; n < num_iterations; ++n) {
     draw = algo.draw();
-    draws.row(n) = draw;
-    acceptance_rate(n) = algo.acceptance_rate_;
-    log_density(n) = algo.log_density_;
-    nfev(n) = algo.nfev_;
-    if (n >= num_warmup) {
-      w.update(draw);
-    }
   }
 
-  mcmcpp::WelfordAccumulator msjd{};
-  for (std::size_t n = 0; n < num_iterations - 1; ++n) {
-    if (n > num_warmup) {
-      msjd.update((draws.row(n + 1) - draws.row(n)).norm());
-    }
-  }
-
-  std::cout << "means: " << w.mean().transpose() << '\n';
-  std::cout << "stds: " << w.std().transpose() << '\n';
-  std::cout << "msjd: " << msjd.mean()(0) << '\n';
+  std::cout << "Final draw: " << draw.transpose() << '\n';
   std::cout << "stepsize: " << algo.stepsize() << '\n';
   std::cout << "Number log_density evals: " << algo.nfev_ << '\n';
   std::cout << "Acceptance rate: " << algo.acceptance_rate_ << '\n';

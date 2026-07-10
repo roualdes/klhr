@@ -1,23 +1,14 @@
-#include "base_klhr.hpp"
 #include "normal_klhr.hpp"
 #include "sas_klhr.hpp"
-#include "welford.hpp"
 
 #include <CLI/CLI.hpp>
 #include <Eigen/Dense>
-#include <highfive/highfive.hpp>
-#include <highfive/eigen.hpp>
 
 #include <cstddef>
-#include <filesystem>
-#include <iostream>
+#include <cstdint>
 #include <format>
-#include <memory>
-#include <stdexcept>
+#include <iostream>
 #include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 int main(int argc, char** argv) {
 
@@ -170,209 +161,13 @@ int main(int argc, char** argv) {
   };
 
   auto run_sampler = [&](auto& algo) {
-    using Algo = std::remove_cvref_t<decltype(algo)>;
-
-    Eigen::Index D = algo.dim();
-    mcmcpp::WelfordAccumulator w{D};
-
-    Eigen::MatrixXd draws(num_iterations, D);
-    Eigen::VectorXd acceptance_rate(num_iterations);
-    Eigen::VectorXd log_density(num_iterations);
-    Eigen::VectorXd nfev(num_iterations);
-
-    Eigen::VectorXd draw(D);
+    Eigen::VectorXd draw;
     for (std::size_t n = 0; n < num_iterations; ++n) {
       draw = algo.draw();
-      draws.row(n) = draw;
-      acceptance_rate(n) = algo.acceptance_rate_;
-      log_density(n) = algo.log_density_;
-      nfev(n) = algo.nfev_;
-      if (n >= num_warmup) {
-        w.update(draw);
-      }
-    }
-
-    HighFive::File h5("draws/experiments.h5", HighFive::File::Truncate);
-
-    h5.createGroup(model_name);
-    h5.createDataSet(std::format("{}/seed", model_name),
-                     std::to_string(algo.seed()));
-    h5.createDataSet(std::format("{}/draws", model_name), draws);
-    h5.createDataSet(std::format("{}/acceptance_rate", model_name), acceptance_rate);
-    h5.createDataSet(std::format("{}/log_density", model_name), log_density);
-    h5.createDataSet(std::format("{}/nfev", model_name), nfev);
-
-    auto vector_to_eigen = [](const std::vector<double>& x) {
-      Eigen::VectorXd out(x.size());
-      for (Eigen::Index i = 0; i < out.size(); ++i) {
-        out(i) = x[static_cast<std::size_t>(i)];
-      }
-      return out;
-    };
-
-    auto vector_to_matrix = [D](const std::vector<Eigen::VectorXd>& x) {
-      Eigen::MatrixXd out(x.size(), D);
-      for (Eigen::Index i = 0; i < out.rows(); ++i) {
-        out.row(i) = x[static_cast<std::size_t>(i)].transpose();
-      }
-      return out;
-    };
-
-    h5.createDataSet(std::format("{}/proposal_draws", model_name),
-                     vector_to_matrix(algo.proposal_draw_history()));
-    h5.createDataSet(std::format("{}/proposal_log_accept", model_name),
-                     vector_to_eigen(algo.proposal_log_accept_history()));
-    h5.createDataSet(std::format("{}/proposal_log_density", model_name),
-                     vector_to_eigen(algo.proposal_log_density_history()));
-    h5.createDataSet(std::format("{}/proposal_accepted", model_name),
-                     vector_to_eigen(algo.proposal_accepted_history()));
-    h5.createDataSet(std::format("{}/proposal_valid", model_name),
-                     vector_to_eigen(algo.proposal_valid_history()));
-
-    if constexpr (std::is_base_of_v<klhr::BaseKLHR, Algo>) {
-      auto write_line_fit_diagnostics =
-        [&](const std::string& stage,
-            const std::vector<klhr::BaseKLHR::LineFitDiagnostics>& history) {
-          auto write = [&](const std::string& name, auto value) {
-            Eigen::VectorXd out(history.size());
-            for (Eigen::Index i = 0; i < out.size(); ++i) {
-              out(i) = static_cast<double>(
-                value(history[static_cast<std::size_t>(i)]));
-            }
-            h5.createDataSet(
-              std::format("{}/line_fit_{}_{}", model_name, stage, name), out);
-          };
-
-          write("attempted", [](const auto& x) { return x.attempted; });
-          write("mode_location",
-                [](const auto& x) { return x.mode_location; });
-          write("final_location",
-                [](const auto& x) { return x.final_location; });
-          write("location_correction",
-                [](const auto& x) { return x.location_correction; });
-          write("inverse_hessian",
-                [](const auto& x) { return x.inverse_hessian; });
-          write("hessian_usable",
-                [](const auto& x) { return x.hessian_usable; });
-          write("hessian_identity",
-                [](const auto& x) { return x.hessian_identity; });
-          write("laplace_scale",
-                [](const auto& x) { return x.laplace_scale; });
-          write("initial_scale",
-                [](const auto& x) { return x.initial_scale; });
-          write("final_scale", [](const auto& x) { return x.final_scale; });
-          write("laplace_log_scale_correction",
-                [](const auto& x) {
-                  return x.laplace_log_scale_correction;
-                });
-          write("laplace_scale_ratio",
-                [](const auto& x) { return x.laplace_scale_ratio; });
-          write("log_scale_correction",
-                [](const auto& x) { return x.log_scale_correction; });
-          write("scale_ratio", [](const auto& x) { return x.scale_ratio; });
-          write("scale_bound_fraction",
-                [](const auto& x) { return x.scale_bound_fraction; });
-          write("scale_transform_derivative",
-                [](const auto& x) { return x.scale_transform_derivative; });
-          write("scale_saturated",
-                [](const auto& x) { return x.scale_saturated; });
-          write("final_skew", [](const auto& x) { return x.final_skew; });
-          write("mode_success", [](const auto& x) { return x.mode_success; });
-          write("mode_iterations",
-                [](const auto& x) { return x.mode_iterations; });
-          write("mode_nfev", [](const auto& x) { return x.mode_nfev; });
-          write("kl_attempted", [](const auto& x) { return x.kl_attempted; });
-          write("kl_success", [](const auto& x) { return x.kl_success; });
-          write("kl_iterations",
-                [](const auto& x) { return x.kl_iterations; });
-          write("kl_nfev", [](const auto& x) { return x.kl_nfev; });
-          write("kl_initial_objective",
-                [](const auto& x) { return x.kl_initial_objective; });
-          write("kl_final_objective",
-                [](const auto& x) { return x.kl_final_objective; });
-          write("kl_objective_improvement",
-                [](const auto& x) { return x.kl_objective_improvement; });
-          write("kl_initial_gradient_norm",
-                [](const auto& x) { return x.kl_initial_gradient_norm; });
-          write("kl_final_gradient_norm",
-                [](const auto& x) { return x.kl_final_gradient_norm; });
-        };
-
-      write_line_fit_diagnostics(
-        "forward", algo.forward_line_fit_diagnostics_history());
-      write_line_fit_diagnostics(
-        "reverse", algo.reverse_line_fit_diagnostics_history());
-
-      h5.createDataSet(std::format("{}/transport_distance", model_name),
-                       vector_to_eigen(algo.transport_distance_history()));
-      h5.createDataSet(std::format("{}/transport_reflections", model_name),
-                       vector_to_eigen(algo.transport_reflections_history()));
-      h5.createDataSet(std::format("{}/transport_logp_gain", model_name),
-                       vector_to_eigen(algo.transport_logp_gain_history()));
-      h5.createDataSet(std::format("{}/transport_uturn", model_name),
-                       vector_to_eigen(algo.transport_uturn_history()));
-      h5.createDataSet(std::format("{}/transport_moved", model_name),
-                       vector_to_eigen(algo.transport_moved_history()));
-      h5.createDataSet(std::format("{}/transport_direction_norm", model_name),
-                       vector_to_eigen(algo.transport_direction_norm_history()));
-      h5.createDataSet(std::format("{}/transport_variance", model_name),
-                       vector_to_matrix(algo.transport_variance_history()));
-      h5.createDataSet(std::format("{}/transport_handoff_pca_basis", model_name),
-                       algo.transport_handoff_pca_basis());
-      h5.createDataSet(std::format("{}/transport_handoff_pca_weights", model_name),
-                       algo.transport_handoff_pca_weights());
-      h5.createDataSet(std::format("{}/transport_handoff_pca_count", model_name),
-                       static_cast<double>(algo.transport_handoff_pca_count()));
-      h5.createDataSet(std::format("{}/transport_handoff_pca_ready", model_name),
-                       algo.transport_handoff_pca_ready() ? 1.0 : 0.0);
-      h5.createDataSet(std::format("{}/transport_handoff_pca_whitened", model_name),
-                       algo.transport_handoff_pca_whitened() ? 1.0 : 0.0);
-      h5.createDataSet(std::format("{}/transport_rollback", model_name),
-                       algo.transport_rollback() ? 1.0 : 0.0);
-      h5.createDataSet(std::format("{}/transport_initial_log_density", model_name),
-                       algo.transport_initial_log_density());
-      h5.createDataSet(std::format("{}/transport_best_log_density", model_name),
-                       algo.transport_best_log_density());
-      h5.createDataSet(std::format("{}/transport_endpoint_from_best_drop", model_name),
-                       algo.transport_endpoint_from_best_drop());
-    }
-
-    if constexpr (std::is_same_v<Algo, klhr::SASKLHR>) {
-      h5.createDataSet(std::format("{}/sas_location", model_name),
-                       vector_to_eigen(algo.sas_location_history()));
-      h5.createDataSet(std::format("{}/sas_scale", model_name),
-                       vector_to_eigen(algo.sas_scale_history()));
-      h5.createDataSet(std::format("{}/sas_skew", model_name),
-                       vector_to_eigen(algo.sas_skew_history()));
-      h5.createDataSet(std::format("{}/sas_m", model_name),
-                       vector_to_eigen(algo.sas_m_history()));
-      h5.createDataSet(std::format("{}/sas_sampled_xi", model_name),
-                       vector_to_eigen(algo.sas_xi_history()));
-      h5.createDataSet(std::format("{}/sas_accepted_xi", model_name),
-                       vector_to_eigen(algo.sas_accepted_xi_history()));
-      h5.createDataSet(std::format("{}/sas_accepted", model_name),
-                       vector_to_eigen(algo.sas_accepted_history()));
-    }
-
-    if constexpr (std::is_same_v<Algo, klhr::NormalKLHR>) {
-      h5.createDataSet(std::format("{}/normal_mean", model_name),
-                       vector_to_eigen(algo.normal_mean_history()));
-      h5.createDataSet(
-        std::format("{}/normal_standard_deviation", model_name),
-        vector_to_eigen(algo.normal_standard_deviation_history()));
-    }
-
-    mcmcpp::WelfordAccumulator msjd{};
-    for (std::size_t n = 0; n < num_iterations - 1; ++n) {
-      if (n > num_warmup) {
-        msjd.update((draws.row(n + 1) - draws.row(n)).norm());
-      }
     }
 
     std::cout << "Seed: " << algo.seed() << '\n';
-    std::cout << "means: " << w.mean().transpose() << '\n';
-    std::cout << "stds: " << w.std().transpose() << '\n';
-    std::cout << "msjd: " << msjd.mean()(0) << '\n';
+    std::cout << "Final draw: " << draw.transpose() << '\n';
     std::cout << "Number log_density evals: " << algo.nfev_ << '\n';
     std::cout << "Acceptance rate: " << algo.acceptance_rate_ << '\n';
 

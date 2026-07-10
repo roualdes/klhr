@@ -16,7 +16,6 @@
 #include <limits>
 #include <random>
 #include <utility>
-#include <vector>
 
 namespace klhr {
 
@@ -51,8 +50,6 @@ public:
 
   struct StepResult {
     State state;
-    Eigen::VectorXd proposal;
-    double proposal_log_density = std::numeric_limits<double>::quiet_NaN();
     bool moved = false;
     std::size_t evaluations = 0;
   };
@@ -62,7 +59,6 @@ public:
     Eigen::VectorXd covariance;
     Eigen::MatrixXd pca_basis;
     Eigen::VectorXd pca_weights;
-    std::size_t pca_count = 0;
     bool pca_ready = false;
     bool pca_whitened = false;
     bool rollback = false;
@@ -102,11 +98,9 @@ public:
     mean_direction_ready_ = false;
     handoff_basis_.setZero();
     handoff_weights_.setZero();
-    handoff_count_ = 0;
     handoff_ready_ = false;
     handoff_whitened_ = false;
     rollback_ = false;
-    endpoint_from_best_drop_ = nan_();
     distance_ = valid_initial_distance_(opts_);
     direction_ = normal_rng_(dim_, rng, standard_normal);
     regularize_direction_(rng, standard_normal);
@@ -121,11 +115,8 @@ public:
                   Constrain&& constrain) {
     StepResult result;
     result.state = state_;
-    const Eigen::VectorXd missing_variance =
-      Eigen::VectorXd::Constant(dim_, nan_());
 
     if (!initialized_) {
-      record_step_(nan_(), 0.0, nan_(), false, false, missing_variance);
       return result;
     }
 
@@ -139,7 +130,6 @@ public:
         !scale.allFinite() || !std::isfinite(start.log_density) ||
         !direction0.allFinite()) {
       regularize_direction_(rng, standard_normal);
-      record_step_(nan_(), 0.0, nan_(), false, false, missing_variance);
       result.state = state_;
       return result;
     }
@@ -149,11 +139,7 @@ public:
     Eigen::VectorXd direction = direction0;
     Eigen::VectorXd endpoint_direction = direction0;
     bool moved = false;
-    bool uturn = false;
     bool failed = false;
-    double total_distance = 0.0;
-    double endpoint_logp_gain = nan_();
-    std::size_t reflections = 0;
 
     for (std::size_t reflection = 0;
          reflection < opts_.max_reflections; ++reflection) {
@@ -196,17 +182,13 @@ public:
       const double initial_turning = delta.dot(direction0);
       if (!std::isfinite(turning) || !std::isfinite(initial_turning) ||
           turning <= 0.0 || initial_turning <= 0.0) {
-        uturn = true;
         break;
       }
 
       endpoint = next;
       current = next;
       moved = true;
-      ++reflections;
-      total_distance += distance;
       distance_ = distance;
-      endpoint_logp_gain = endpoint.log_density - start.log_density;
 
       const Eigen::VectorXd reflected =
         reflected_direction_(direction, endpoint.grad, scale);
@@ -223,8 +205,6 @@ public:
         moved = false;
       } else {
         state_ = endpoint;
-        result.proposal = std::move(proposal);
-        result.proposal_log_density = endpoint.log_density;
         update_covariance_(state_.theta);
         update_best_state_();
       }
@@ -232,9 +212,6 @@ public:
 
     update_direction_(moved, failed, endpoint_direction, direction0,
                       rng, standard_normal);
-    record_step_(total_distance, static_cast<double>(reflections),
-                 endpoint_logp_gain, uturn, moved,
-                 scale.array().square().matrix());
 
     result.state = state_;
     result.moved = moved;
@@ -243,14 +220,14 @@ public:
 
   Handoff finish(mcmcpp::rng& rng,
                  std::normal_distribution<double>& standard_normal) {
-    endpoint_from_best_drop_ = best_state_.log_density - state_.log_density;
-    if (std::isfinite(endpoint_from_best_drop_) &&
-        endpoint_from_best_drop_ > opts_.max_endpoint_from_best_drop) {
+    const double endpoint_from_best_drop =
+      best_state_.log_density - state_.log_density;
+    if (std::isfinite(endpoint_from_best_drop) &&
+        endpoint_from_best_drop > opts_.max_endpoint_from_best_drop) {
       rollback_to_initial_(rng, standard_normal);
       return handoff_();
     }
 
-    handoff_count_ = pca_.count();
     handoff_ready_ = set_mean_direction_from_pca_();
     handoff_whitened_ = handoff_ready_;
     if (handoff_ready_) {
@@ -262,75 +239,6 @@ public:
     }
     pca_.reset();
     return handoff_();
-  }
-
-  void record_inactive_step() {
-    record_step_(nan_(), nan_(), nan_(), false, false,
-                 Eigen::VectorXd::Constant(dim_, nan_()));
-  }
-
-  const std::vector<double>& distance_history() const {
-    return distance_history_;
-  }
-
-  const std::vector<double>& reflections_history() const {
-    return reflections_history_;
-  }
-
-  const std::vector<double>& logp_gain_history() const {
-    return logp_gain_history_;
-  }
-
-  const std::vector<double>& uturn_history() const {
-    return uturn_history_;
-  }
-
-  const std::vector<double>& moved_history() const {
-    return moved_history_;
-  }
-
-  const std::vector<double>& direction_norm_history() const {
-    return direction_norm_history_;
-  }
-
-  const std::vector<Eigen::VectorXd>& variance_history() const {
-    return variance_history_;
-  }
-
-  const Eigen::MatrixXd& handoff_pca_basis() const {
-    return handoff_basis_;
-  }
-
-  const Eigen::VectorXd& handoff_pca_weights() const {
-    return handoff_weights_;
-  }
-
-  std::size_t handoff_pca_count() const {
-    return handoff_count_;
-  }
-
-  bool handoff_pca_ready() const {
-    return handoff_ready_;
-  }
-
-  bool handoff_pca_whitened() const {
-    return handoff_whitened_;
-  }
-
-  bool rollback() const {
-    return rollback_;
-  }
-
-  double initial_log_density() const {
-    return initial_state_.log_density;
-  }
-
-  double best_log_density() const {
-    return best_state_.log_density;
-  }
-
-  double endpoint_from_best_drop() const {
-    return endpoint_from_best_drop_;
   }
 
 private:
@@ -747,7 +655,6 @@ private:
     mean_direction_ready_ = false;
     handoff_basis_.setZero();
     handoff_weights_.setZero();
-    handoff_count_ = 0;
     handoff_ready_ = false;
     handoff_whitened_ = false;
     distance_ = valid_initial_distance_(opts_);
@@ -761,26 +668,10 @@ private:
       .covariance = covariance_,
       .pca_basis = handoff_basis_,
       .pca_weights = handoff_weights_,
-      .pca_count = handoff_count_,
       .pca_ready = handoff_ready_,
       .pca_whitened = handoff_whitened_,
       .rollback = rollback_,
     };
-  }
-
-  void record_step_(const double distance,
-                    const double reflections,
-                    const double logp_gain,
-                    const bool uturn,
-                    const bool moved,
-                    const Eigen::VectorXd& variance) {
-    distance_history_.push_back(distance);
-    reflections_history_.push_back(reflections);
-    logp_gain_history_.push_back(logp_gain);
-    uturn_history_.push_back(uturn ? 1.0 : 0.0);
-    moved_history_.push_back(moved ? 1.0 : 0.0);
-    variance_history_.push_back(variance);
-    direction_norm_history_.push_back(direction_.norm());
   }
 
   void set_bad_kl_(const Eigen::VectorXd& eta,
@@ -854,20 +745,11 @@ private:
   Eigen::MatrixXd handoff_basis_;
   Eigen::VectorXd handoff_weights_;
   double distance_;
-  double endpoint_from_best_drop_ = nan_();
   bool initialized_ = false;
   bool mean_direction_ready_ = false;
   bool handoff_ready_ = false;
   bool handoff_whitened_ = false;
   bool rollback_ = false;
-  std::size_t handoff_count_ = 0;
-  std::vector<double> distance_history_;
-  std::vector<double> reflections_history_;
-  std::vector<double> logp_gain_history_;
-  std::vector<double> uturn_history_;
-  std::vector<double> moved_history_;
-  std::vector<double> direction_norm_history_;
-  std::vector<Eigen::VectorXd> variance_history_;
 };
 
 } // namespace klhr

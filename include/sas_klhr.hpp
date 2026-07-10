@@ -4,7 +4,6 @@
 #include "normal_quantile.hpp"
 
 #include <tuple>
-#include <vector>
 
 namespace klhr {
 
@@ -12,52 +11,9 @@ class SASKLHR : public BaseKLHR {
 public:
   using BaseKLHR::BaseKLHR;
 
-  const std::vector<double>& sas_location_history() const {
-    return sas_location_;
-  }
-
-  const std::vector<double>& sas_scale_history() const {
-    return sas_scale_;
-  }
-
-  const std::vector<double>& sas_skew_history() const {
-    return sas_skew_;
-  }
-
-  const std::vector<double>& sas_m_history() const {
-    return sas_location_;
-  }
-
-  const std::vector<double>& sas_xi_history() const {
-    return sas_xi_;
-  }
-
-  const std::vector<double>& sas_accepted_xi_history() const {
-    return sas_accepted_xi_;
-  }
-
-  const std::vector<double>& sas_accepted_history() const {
-    return sas_accepted_;
-  }
-
 protected:
-  void record_kl_step_(const Eigen::VectorXd& eta, const double xi,
-                       const bool accepted) override {
-    const double nan = nan_();
-    const bool valid_eta = eta.size() >= 3 && eta.allFinite();
-    const bool valid_xi = std::isfinite(xi);
-    const double scale = valid_eta ? scale_from_log_(eta(1)) : nan;
-
-    sas_location_.push_back(valid_eta ? eta(0) : nan);
-    sas_scale_.push_back(std::isfinite(scale) ? scale : nan);
-    sas_skew_.push_back(valid_eta ? eta(2) : nan);
-    sas_xi_.push_back(valid_xi ? xi : nan);
-    sas_accepted_xi_.push_back(accepted && valid_xi ? xi : nan);
-    sas_accepted_.push_back(accepted ? 1.0 : 0.0);
-  }
-
-  LineFitResult fit_line_(const Eigen::VectorXd& center,
-                          const Eigen::VectorXd& rho) override {
+  Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
+                            const Eigen::VectorXd& rho) override {
     return fit_line_with_kl_fallback_(
       center, rho, 3,
       [this, &center, &rho](const Eigen::VectorXd& eta,
@@ -249,12 +205,6 @@ protected:
     return 5.0;
   }
 
-  std::vector<double> sas_location_;
-  std::vector<double> sas_scale_;
-  std::vector<double> sas_skew_;
-  std::vector<double> sas_xi_;
-  std::vector<double> sas_accepted_xi_;
-  std::vector<double> sas_accepted_;
 };
 
 } // namespace klhr

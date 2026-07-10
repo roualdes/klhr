@@ -4,7 +4,6 @@
 #include "normal_quantile.hpp"
 
 #include <utility>
-#include <vector>
 
 namespace klhr {
 
@@ -12,31 +11,9 @@ class NormalKLHR : public BaseKLHR {
 public:
   using BaseKLHR::BaseKLHR;
 
-  const std::vector<double>& normal_mean_history() const {
-    return normal_mean_;
-  }
-
-  const std::vector<double>& normal_standard_deviation_history() const {
-    return normal_standard_deviation_;
-  }
-
 protected:
-  void record_kl_step_(const Eigen::VectorXd& eta, const double xi,
-                       const bool accepted) override {
-    (void) xi;
-    (void) accepted;
-
-    const double nan = nan_();
-    const bool valid_eta = eta.size() >= 2 && eta.allFinite();
-    const double sigma = valid_eta ? scale_from_log_(eta(1)) : nan;
-
-    normal_mean_.push_back(valid_eta ? eta(0) : nan);
-    normal_standard_deviation_.push_back(
-      std::isfinite(sigma) ? sigma : nan);
-  }
-
-  LineFitResult fit_line_(const Eigen::VectorXd& center,
-                          const Eigen::VectorXd& rho) override {
+  Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
+                            const Eigen::VectorXd& rho) override {
     return fit_line_with_kl_fallback_(
       center, rho, 2,
       [this, &center, &rho](const Eigen::VectorXd& eta,
@@ -151,8 +128,6 @@ protected:
     return {mu, sigma};
   }
 
-  std::vector<double> normal_mean_;
-  std::vector<double> normal_standard_deviation_;
 };
 
 } // namespace klhr

@@ -54,23 +54,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(bfgs)
 
-## HDF5
-# HDF5 need be installed and findable
-find_package(HDF5 REQUIRED COMPONENTS C)
-
-set(HIGHFIVE_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(HIGHFIVE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(HIGHFIVE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(HIGHFIVE_USE_BOOST OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    highfive
-    GIT_REPOSITORY "https://github.com/highfive-devs/highfive"
-    GIT_TAG        "main"
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(highfive)
-set(KLHR_HIGHFIVE_TARGET HighFive::HighFive)
-
 ## Examples
 if (KLHR_BUILD_EXAMPLES)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/examples")
