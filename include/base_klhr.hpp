@@ -59,6 +59,44 @@ struct KlhrOptions {
 class BaseKLHR {
 public:
 
+  struct LineFitDiagnostics {
+    bool attempted = false;
+    double mode_location = std::numeric_limits<double>::quiet_NaN();
+    double final_location = std::numeric_limits<double>::quiet_NaN();
+    double location_correction = std::numeric_limits<double>::quiet_NaN();
+    double inverse_hessian = std::numeric_limits<double>::quiet_NaN();
+    bool hessian_usable = false;
+    bool hessian_identity = false;
+    double laplace_scale = std::numeric_limits<double>::quiet_NaN();
+    double initial_scale = std::numeric_limits<double>::quiet_NaN();
+    double final_scale = std::numeric_limits<double>::quiet_NaN();
+    double laplace_log_scale_correction =
+      std::numeric_limits<double>::quiet_NaN();
+    double laplace_scale_ratio = std::numeric_limits<double>::quiet_NaN();
+    double log_scale_correction = std::numeric_limits<double>::quiet_NaN();
+    double scale_ratio = std::numeric_limits<double>::quiet_NaN();
+    double scale_bound_fraction = std::numeric_limits<double>::quiet_NaN();
+    double scale_transform_derivative =
+      std::numeric_limits<double>::quiet_NaN();
+    bool scale_saturated = false;
+    double final_skew = std::numeric_limits<double>::quiet_NaN();
+    bool mode_success = false;
+    std::size_t mode_iterations = 0;
+    std::size_t mode_nfev = 0;
+    bool kl_attempted = false;
+    bool kl_success = false;
+    std::size_t kl_iterations = 0;
+    std::size_t kl_nfev = 0;
+    double kl_initial_objective = std::numeric_limits<double>::quiet_NaN();
+    double kl_final_objective = std::numeric_limits<double>::quiet_NaN();
+    double kl_objective_improvement =
+      std::numeric_limits<double>::quiet_NaN();
+    double kl_initial_gradient_norm =
+      std::numeric_limits<double>::quiet_NaN();
+    double kl_final_gradient_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  };
+
   std::size_t nfev_;
   double acceptance_rate_;
   double log_density_;
@@ -147,6 +185,8 @@ public:
   }
 
   Eigen::VectorXd draw() {
+    current_forward_line_fit_ = LineFitDiagnostics{};
+    current_reverse_line_fit_ = LineFitDiagnostics{};
     ++draw_;
     if (draw_ <= opts_.initial_transport_steps) {
       initial_transport_step_();
@@ -154,6 +194,7 @@ public:
       if (draw_ == opts_.initial_transport_steps) {
         finalize_transport_handoff_();
       }
+      record_line_fit_diagnostics_();
       return bsm_.param_constrain(theta_);
     }
 
@@ -162,6 +203,7 @@ public:
     record_transport_step_(nan_(), nan_(), nan_(), false, false,
                            missing_unconstrained_draw_());
     adapt_warmup_(theta_, draw_);
+    record_line_fit_diagnostics_();
     return bsm_.param_constrain(theta_);
   }
 
@@ -183,6 +225,16 @@ public:
 
   const std::vector<double>& proposal_valid_history() const {
     return proposal_valid_;
+  }
+
+  const std::vector<LineFitDiagnostics>&
+  forward_line_fit_diagnostics_history() const {
+    return forward_line_fit_diagnostics_;
+  }
+
+  const std::vector<LineFitDiagnostics>&
+  reverse_line_fit_diagnostics_history() const {
+    return reverse_line_fit_diagnostics_;
   }
 
   const std::vector<double>& transport_distance_history() const {
@@ -268,8 +320,13 @@ public:
 
 protected:
 
-  virtual Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
-                                    const Eigen::VectorXd& rho) = 0;
+  struct LineFitResult {
+    Eigen::VectorXd eta;
+    LineFitDiagnostics diagnostics;
+  };
+
+  virtual LineFitResult fit_line_(const Eigen::VectorXd& center,
+                                  const Eigen::VectorXd& rho) = 0;
 
   virtual double overrelaxed_proposal_(const Eigen::VectorXd& eta) = 0;
 
@@ -339,6 +396,12 @@ protected:
   struct LineModeEstimate {
     double mode = 0.0;
     double log_scale = 0.0;
+    double inverse_hessian = std::numeric_limits<double>::quiet_NaN();
+    bool hessian_usable = false;
+    bool hessian_identity = false;
+    bool success = false;
+    std::size_t iterations = 0;
+    std::size_t nfev = 0;
   };
 
   LineModeEstimate fit_line_mode_(const Eigen::VectorXd& center,
@@ -357,10 +420,118 @@ protected:
     nfev_ += mode.nfev;
 
     LineModeEstimate out;
-    out.mode = mode.x(0);
-    const double h = mode.hess_inv(0, 0);
-    if (std::isfinite(h) && h > 0.0) {
-      out.log_scale = 0.5 * std::log(h * 1.1);
+    if (mode.x.size() == 1 && std::isfinite(mode.x(0))) {
+      out.mode = mode.x(0);
+    }
+    if (mode.hess_inv.rows() == 1 && mode.hess_inv.cols() == 1) {
+      out.inverse_hessian = mode.hess_inv(0, 0);
+    }
+    out.hessian_usable =
+      std::isfinite(out.inverse_hessian) && out.inverse_hessian > 0.0;
+    if (out.hessian_usable) {
+      out.log_scale = 0.5 * std::log(out.inverse_hessian);
+      const double identity_tolerance =
+        64.0 * std::numeric_limits<double>::epsilon() *
+        std::max(1.0, std::abs(out.inverse_hessian));
+      out.hessian_identity =
+        std::abs(out.inverse_hessian - 1.0) <= identity_tolerance;
+    }
+    out.success = mode.success;
+    out.iterations = mode.nit;
+    out.nfev = mode.nfev;
+    return out;
+  }
+
+  LineFitResult make_line_fit_result_(
+      const LineModeEstimate& mode,
+      const bfgs::BfgsResult& fit,
+      const Eigen::VectorXd& raw,
+      const Eigen::VectorXd& eta,
+      const double initial_objective,
+      const double initial_gradient_norm) const {
+    LineFitResult out = make_line_fit_result_(mode, raw, eta);
+    LineFitDiagnostics& diagnostics = out.diagnostics;
+    diagnostics.kl_attempted = true;
+    diagnostics.kl_success = fit.success;
+    diagnostics.kl_iterations = fit.nit;
+    diagnostics.kl_nfev =
+      fit.nfev * static_cast<std::size_t>(opts_.N);
+    diagnostics.kl_initial_objective = initial_objective;
+    diagnostics.kl_initial_gradient_norm = initial_gradient_norm;
+
+    const bool fit_result_matches_output =
+      fit.x.size() == raw.size() && fit.x.allFinite();
+    diagnostics.kl_final_objective = fit_result_matches_output ?
+      fit.fun : initial_objective;
+    if (std::isfinite(diagnostics.kl_initial_objective) &&
+        std::isfinite(diagnostics.kl_final_objective)) {
+      diagnostics.kl_objective_improvement =
+        diagnostics.kl_initial_objective - diagnostics.kl_final_objective;
+    }
+    if (fit.jac.size() == raw.size() && fit.jac.allFinite()) {
+      diagnostics.kl_final_gradient_norm =
+        fit.jac.lpNorm<Eigen::Infinity>();
+    }
+    return out;
+  }
+
+  LineFitResult make_laplace_line_fit_result_(
+      const LineModeEstimate& mode,
+      const Eigen::Index parameter_count) const {
+    Eigen::VectorXd raw = Eigen::VectorXd::Zero(parameter_count);
+    Eigen::VectorXd eta = Eigen::VectorXd::Zero(parameter_count);
+    raw(0) = mode.mode;
+    eta(0) = mode.mode;
+    eta(1) = mode.log_scale;
+    return make_line_fit_result_(mode, raw, eta);
+  }
+
+  LineFitResult make_line_fit_result_(
+      const LineModeEstimate& mode,
+      const Eigen::VectorXd& raw,
+      const Eigen::VectorXd& eta) const {
+    LineFitResult out;
+    out.eta = eta;
+
+    LineFitDiagnostics& diagnostics = out.diagnostics;
+    diagnostics.attempted = true;
+    diagnostics.mode_location = mode.mode;
+    diagnostics.inverse_hessian = mode.inverse_hessian;
+    diagnostics.hessian_usable = mode.hessian_usable;
+    diagnostics.hessian_identity = mode.hessian_identity;
+    diagnostics.mode_success = mode.success;
+    diagnostics.mode_iterations = mode.iterations;
+    diagnostics.mode_nfev = mode.nfev;
+    if (mode.hessian_usable) {
+      diagnostics.laplace_scale = std::sqrt(mode.inverse_hessian);
+    }
+    diagnostics.initial_scale = scale_from_log_(mode.log_scale);
+
+    if (eta.size() >= 2 && eta.allFinite()) {
+      diagnostics.final_location = eta(0);
+      diagnostics.location_correction = eta(0) - mode.mode;
+      diagnostics.final_scale = scale_from_log_(eta(1));
+      if (mode.hessian_usable) {
+        const double laplace_log_scale =
+          0.5 * std::log(mode.inverse_hessian);
+        diagnostics.laplace_log_scale_correction =
+          eta(1) - laplace_log_scale;
+        diagnostics.laplace_scale_ratio =
+          std::exp(diagnostics.laplace_log_scale_correction);
+      }
+      diagnostics.log_scale_correction = eta(1) - mode.log_scale;
+      diagnostics.scale_ratio = std::exp(diagnostics.log_scale_correction);
+      diagnostics.scale_bound_fraction =
+        std::abs(diagnostics.log_scale_correction) / log_scale_radius_();
+      diagnostics.scale_saturated =
+        diagnostics.scale_bound_fraction >= scale_saturation_fraction_();
+      if (eta.size() >= 3) {
+        diagnostics.final_skew = eta(2);
+      }
+    }
+    if (raw.size() >= 2 && std::isfinite(raw(1))) {
+      diagnostics.scale_transform_derivative =
+        relative_log_scale_derivative_(raw(1));
     }
     return out;
   }
@@ -425,6 +596,10 @@ protected:
   std::vector<double> proposal_log_density_;
   std::vector<double> proposal_accepted_;
   std::vector<double> proposal_valid_;
+  std::vector<LineFitDiagnostics> forward_line_fit_diagnostics_;
+  std::vector<LineFitDiagnostics> reverse_line_fit_diagnostics_;
+  LineFitDiagnostics current_forward_line_fit_;
+  LineFitDiagnostics current_reverse_line_fit_;
   std::vector<double> transport_distance_history_;
   std::vector<double> transport_reflections_;
   std::vector<double> transport_logp_gain_;
@@ -476,7 +651,9 @@ protected:
       record_kl_step_(eta, xi, false);
     };
 
-    Eigen::VectorXd eta = fit_line_(theta_, rho);
+    LineFitResult forward_fit = fit_line_(theta_, rho);
+    current_forward_line_fit_ = forward_fit.diagnostics;
+    Eigen::VectorXd eta = std::move(forward_fit.eta);
     if (!eta.allFinite()) {
       reject(eta, missing_xi, missing_draw,
              missing_xi, missing_xi, false);
@@ -513,7 +690,9 @@ protected:
       return;
     }
 
-    Eigen::VectorXd reta = fit_line_(thetap, rho);
+    LineFitResult reverse_fit = fit_line_(thetap, rho);
+    current_reverse_line_fit_ = reverse_fit.diagnostics;
+    Eigen::VectorXd reta = std::move(reverse_fit.eta);
     if (!reta.allFinite()) {
       reject(eta, xi, proposal,
              ldp, missing_xi, false);
@@ -891,6 +1070,11 @@ protected:
     proposal_log_accept_.push_back(log_accept);
     proposal_accepted_.push_back(accepted ? 1.0 : 0.0);
     proposal_valid_.push_back(valid ? 1.0 : 0.0);
+  }
+
+  void record_line_fit_diagnostics_() {
+    forward_line_fit_diagnostics_.push_back(current_forward_line_fit_);
+    reverse_line_fit_diagnostics_.push_back(current_reverse_line_fit_);
   }
 
   void record_transport_step_(const double distance,
@@ -1537,6 +1721,10 @@ protected:
 
   static constexpr double log_scale_radius_() {
     return 4.6051701859880918; // log(100)
+  }
+
+  static constexpr double scale_saturation_fraction_() {
+    return 0.9;
   }
 
   static constexpr double weibull_log_shape_radius_() {

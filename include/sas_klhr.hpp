@@ -62,27 +62,41 @@ protected:
     sas_accepted_.push_back(accepted ? 1.0 : 0.0);
   }
 
-  Eigen::VectorXd fit_line_(const Eigen::VectorXd& center,
-                            const Eigen::VectorXd& rho) override {
+  LineFitResult fit_line_(const Eigen::VectorXd& center,
+                          const Eigen::VectorXd& rho) override {
     const LineModeEstimate mode = fit_line_mode_(center, rho);
+    if (mode.success && mode.hessian_usable && !mode.hessian_identity) {
+      return make_laplace_line_fit_result_(mode, 3);
+    }
+
     Eigen::VectorXd init(3);
     init << mode.mode, 0.0, 0.0;
 
+    double initial_objective = std::numeric_limits<double>::quiet_NaN();
+    double initial_gradient_norm = std::numeric_limits<double>::quiet_NaN();
+    bool initial_evaluation_recorded = false;
     auto kl = [&, this](const Eigen::VectorXd& eta,
                         double& value, Eigen::VectorXd& grad) {
       KL_(eta, center, rho, mode.log_scale, value, grad);
+      if (!initial_evaluation_recorded) {
+        initial_objective = value;
+        if (grad.allFinite()) {
+          initial_gradient_norm = grad.lpNorm<Eigen::Infinity>();
+        }
+        initial_evaluation_recorded = true;
+      }
     };
     bfgs::BfgsResult o =
       bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
-                            .xrtol = opts_.gtol,
-                            .maxiter_bfgs = 3});
+                            .xrtol = opts_.gtol});
     nfev_ += o.nfev * opts_.N;
     const Eigen::VectorXd raw =
       o.x.size() == 3 && o.x.allFinite() ? o.x : init;
     Eigen::VectorXd out(3);
     out << raw(0), relative_log_scale_(raw(1), mode.log_scale),
       bounded_skew_(raw(2));
-    return out;
+    return make_line_fit_result_(mode, o, raw, out, initial_objective,
+                                 initial_gradient_norm);
   }
 
   double overrelaxed_proposal_(const Eigen::VectorXd& eta) override {

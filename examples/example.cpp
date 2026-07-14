@@ -230,6 +230,79 @@ int main(int argc, char** argv) {
                      vector_to_eigen(algo.proposal_valid_history()));
 
     if constexpr (std::is_base_of_v<klhr::BaseKLHR, Algo>) {
+      auto write_line_fit_diagnostics =
+        [&](const std::string& stage,
+            const std::vector<klhr::BaseKLHR::LineFitDiagnostics>& history) {
+          auto write = [&](const std::string& name, auto value) {
+            Eigen::VectorXd out(history.size());
+            for (Eigen::Index i = 0; i < out.size(); ++i) {
+              out(i) = static_cast<double>(
+                value(history[static_cast<std::size_t>(i)]));
+            }
+            h5.createDataSet(
+              std::format("{}/line_fit_{}_{}", model_name, stage, name), out);
+          };
+
+          write("attempted", [](const auto& x) { return x.attempted; });
+          write("mode_location",
+                [](const auto& x) { return x.mode_location; });
+          write("final_location",
+                [](const auto& x) { return x.final_location; });
+          write("location_correction",
+                [](const auto& x) { return x.location_correction; });
+          write("inverse_hessian",
+                [](const auto& x) { return x.inverse_hessian; });
+          write("hessian_usable",
+                [](const auto& x) { return x.hessian_usable; });
+          write("hessian_identity",
+                [](const auto& x) { return x.hessian_identity; });
+          write("laplace_scale",
+                [](const auto& x) { return x.laplace_scale; });
+          write("initial_scale",
+                [](const auto& x) { return x.initial_scale; });
+          write("final_scale", [](const auto& x) { return x.final_scale; });
+          write("laplace_log_scale_correction",
+                [](const auto& x) {
+                  return x.laplace_log_scale_correction;
+                });
+          write("laplace_scale_ratio",
+                [](const auto& x) { return x.laplace_scale_ratio; });
+          write("log_scale_correction",
+                [](const auto& x) { return x.log_scale_correction; });
+          write("scale_ratio", [](const auto& x) { return x.scale_ratio; });
+          write("scale_bound_fraction",
+                [](const auto& x) { return x.scale_bound_fraction; });
+          write("scale_transform_derivative",
+                [](const auto& x) { return x.scale_transform_derivative; });
+          write("scale_saturated",
+                [](const auto& x) { return x.scale_saturated; });
+          write("final_skew", [](const auto& x) { return x.final_skew; });
+          write("mode_success", [](const auto& x) { return x.mode_success; });
+          write("mode_iterations",
+                [](const auto& x) { return x.mode_iterations; });
+          write("mode_nfev", [](const auto& x) { return x.mode_nfev; });
+          write("kl_attempted", [](const auto& x) { return x.kl_attempted; });
+          write("kl_success", [](const auto& x) { return x.kl_success; });
+          write("kl_iterations",
+                [](const auto& x) { return x.kl_iterations; });
+          write("kl_nfev", [](const auto& x) { return x.kl_nfev; });
+          write("kl_initial_objective",
+                [](const auto& x) { return x.kl_initial_objective; });
+          write("kl_final_objective",
+                [](const auto& x) { return x.kl_final_objective; });
+          write("kl_objective_improvement",
+                [](const auto& x) { return x.kl_objective_improvement; });
+          write("kl_initial_gradient_norm",
+                [](const auto& x) { return x.kl_initial_gradient_norm; });
+          write("kl_final_gradient_norm",
+                [](const auto& x) { return x.kl_final_gradient_norm; });
+        };
+
+      write_line_fit_diagnostics(
+        "forward", algo.forward_line_fit_diagnostics_history());
+      write_line_fit_diagnostics(
+        "reverse", algo.reverse_line_fit_diagnostics_history());
+
       h5.createDataSet(std::format("{}/transport_distance", model_name),
                        vector_to_eigen(algo.transport_distance_history()));
       h5.createDataSet(std::format("{}/transport_reflections", model_name),
