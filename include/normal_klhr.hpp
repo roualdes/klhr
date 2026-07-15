@@ -46,11 +46,6 @@ protected:
     const double log_s = relative_log_scale_(eta(1), log_s0);
     const double dlog_s = relative_log_scale_derivative_(eta(1));
     const double sigma = scale_from_log_(log_s);
-    if (!std::isfinite(mu) || !std::isfinite(log_s) ||
-        !std::isfinite(dlog_s) || !std::isfinite(sigma)) {
-      set_bad_kl_(eta, value, grad);
-      return;
-    }
     value = 0.0;
     grad = Eigen::VectorXd::Zero(2);
 
@@ -71,21 +66,15 @@ protected:
         return;
       }
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
-      if (!std::isfinite(logp) || !grad_logp.allFinite()) {
-        set_bad_kl_(eta, value, grad);
-        return;
-      }
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
-      if (!grad_logp.allFinite()) {
+      w_grad_rho = wn * grad_logp.dot(rho);
+      // TODO: does this check prevent any log density gradient checks?
+      // It doesn't seem so to me.
+      if (!std::isfinite(logp) || !std::isfinite(w_grad_rho)) {
         set_bad_kl_(eta, value, grad);
         return;
       }
       value += wn * logp;
-      w_grad_rho = wn * grad_logp.dot(rho);
-      if (!std::isfinite(w_grad_rho)) {
-        set_bad_kl_(eta, value, grad);
-        return;
-      }
       grad(0) += w_grad_rho;
       grad(1) += w_grad_rho * xn * sigma;
     }

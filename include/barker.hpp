@@ -1,6 +1,7 @@
 #pragma once
 
 #include "adam.hpp"
+#include "gradient_sampler_options.hpp"
 
 #include <Eigen/Dense>
 #include <bridgestan.hpp>
@@ -51,18 +52,20 @@ public:
     rng_(options.seed),
     std_uniform_(0.0, 1.0),
     std_normal_(0.0, 1.0),
-    opts_(options),
-    adam_(options.adam_learning_rate, options.adam_beta1,
-          options.adam_beta2, options.adam_epsilon),
-    metric_windowed_adaptation_(metric_warmup_(options), options.windowsize,
-                                options.windowscale),
+    opts_(detail::normalize_gradient_sampler_options(options, 0.4)),
+    adam_(opts_.adam_learning_rate, opts_.adam_beta1,
+          opts_.adam_beta2, opts_.adam_epsilon),
+    metric_start_(detail::metric_start(opts_)),
+    metric_end_(detail::metric_end(opts_)),
+    metric_windowed_adaptation_(metric_end_ - metric_start_,
+                                opts_.windowsize, opts_.windowscale),
     online_moments_(bsm_.dim()) {
 
     if (opts_.seed == 0) {
       std::random_device rd;
-      opts_.seed =
-        (static_cast<std::uint64_t>(rd()) << 32) ^
-        static_cast<std::uint64_t>(rd());
+      const std::uint64_t r1 = rd();
+      const std::uint64_t r2 = rd();
+      opts_.seed = (r1 << 32) ^ r2;
       if (opts_.seed == 0) {
         opts_.seed = 1;
       }
@@ -83,7 +86,7 @@ public:
     ++nfev_;
     grad_ = clipped_gradient_(grad_);
     draw_ = 0;
-    stepsize_ = clamp_stepsize_(opts_.initial_stepsize);
+    stepsize_ = opts_.initial_stepsize;
     log_stepsize_ = std::log(stepsize_);
     adam_.reset();
     find_good_initial_stepsize(opts_.initial_stepsize);
@@ -115,7 +118,7 @@ public:
       proposal.valid && std::log(std_uniform_(rng_)) <
       std::min(0.0, proposal.log_accept);
 
-    const double delta = static_cast<double>(accepted) - acceptance_rate_;
+    const double delta = accepted - acceptance_rate_;
     acceptance_rate_ += delta / draw_;
 
     if (accepted) {
@@ -130,7 +133,7 @@ public:
 
   double find_good_initial_stepsize(double initial = 1.0) {
     double epsilon = clamp_stepsize_(initial);
-    const double target = target_accept_();
+    const double target = opts_.target_accept;
     double accept_stat = trial_accept_stat_(epsilon);
 
     if (!std::isfinite(accept_stat)) {
@@ -187,6 +190,8 @@ private:
   std::normal_distribution<double> std_normal_;
   BarkerOptions opts_;
   Adam adam_;
+  std::size_t metric_start_;
+  std::size_t metric_end_;
   mcmcpp::WindowedAdaptation metric_windowed_adaptation_;
   mcmcpp::WelfordAccumulator online_moments_;
 
@@ -256,12 +261,6 @@ private:
                                const Eigen::VectorXd& grad_from,
                                const double epsilon,
                                const Eigen::VectorXd& variance) const {
-    if (!(epsilon > 0.0) || !std::isfinite(epsilon) ||
-        !to.allFinite() || !from.allFinite() || !grad_from.allFinite() ||
-        !variance.allFinite()) {
-      return -std::numeric_limits<double>::infinity();
-    }
-
     const Eigen::ArrayXd scale =
       epsilon * variance.array().max(opts_.variance_floor).sqrt();
     const Eigen::ArrayXd delta = (to - from).array();
@@ -278,21 +277,19 @@ private:
   }
 
   void adapt_warmup_(const double accept_stat) {
-    if (draw_ == 0 || draw_ > opts_.warmup) {
+    if (draw_ > opts_.warmup) {
       return;
     }
 
-    const std::size_t start = metric_start_();
-    const std::size_t end = metric_end_();
-    const bool in_initial = draw_ <= start;
-    const bool in_metric = draw_ > start && draw_ <= end;
-    const bool in_final = draw_ > end && draw_ <= opts_.warmup;
+    const bool in_initial = draw_ <= metric_start_;
+    const bool in_metric = draw_ > metric_start_ && draw_ <= metric_end_;
+    const bool in_final = draw_ > metric_end_ && draw_ <= opts_.warmup;
 
     if (in_metric) {
       online_moments_.update(theta_);
-      const std::size_t metric_draw = draw_ - start;
+      const std::size_t metric_draw = draw_ - metric_start_;
       if (metric_windowed_adaptation_.window_closed(metric_draw) ||
-          draw_ == end) {
+          draw_ == metric_end_) {
         update_variance_();
         online_moments_.reset();
       }
@@ -319,7 +316,7 @@ private:
   }
 
   void update_stepsize_(const double accept_stat) {
-    const double gradient = accept_stat - target_accept_();
+    const double gradient = accept_stat - opts_.target_accept;
     log_stepsize_ += adam_.step(gradient);
     set_stepsize_(std::exp(log_stepsize_));
   }
@@ -333,20 +330,10 @@ private:
     if (!std::isfinite(epsilon) || !(epsilon > 0.0)) {
       epsilon = 1.0;
     }
-    const double lo = std::max(opts_.min_stepsize,
-                               std::numeric_limits<double>::min());
-    const double hi = std::max(opts_.max_stepsize, lo);
-    return std::clamp(epsilon, lo, hi);
-  }
-
-  double target_accept_() const {
-    return std::clamp(opts_.target_accept, 1e-6, 1.0 - 1e-6);
+    return std::clamp(epsilon, opts_.min_stepsize, opts_.max_stepsize);
   }
 
   Eigen::VectorXd clipped_gradient_(const Eigen::VectorXd& grad) const {
-    if (!std::isfinite(opts_.grad_clip)) {
-      return grad;
-    }
     return grad.array().min(opts_.grad_clip).max(-opts_.grad_clip).matrix();
   }
 
@@ -366,26 +353,6 @@ private:
     return x - std::log1p(std::exp(x));
   }
 
-  std::size_t metric_start_() const {
-    return std::min(opts_.initial_buffer, opts_.warmup);
-  }
-
-  std::size_t metric_end_() const {
-    const std::size_t start = metric_start_();
-    if (opts_.warmup <= start || opts_.warmup <= opts_.terminal_buffer) {
-      return start;
-    }
-    return std::max(start, opts_.warmup - opts_.terminal_buffer);
-  }
-
-  static std::size_t metric_warmup_(const BarkerOptions& options) {
-    const std::size_t start =
-      std::min(options.initial_buffer, options.warmup);
-    if (options.warmup <= start || options.warmup <= options.terminal_buffer) {
-      return 0;
-    }
-    return std::max(start, options.warmup - options.terminal_buffer) - start;
-  }
 };
 
 } // namespace klhr

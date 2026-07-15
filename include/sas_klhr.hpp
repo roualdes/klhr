@@ -52,12 +52,6 @@ protected:
     const double s = scale_from_log_(log_s);
     const double e = bounded_skew_(eta(2));
     const double de = bounded_skew_derivative_(eta(2));
-    if (!std::isfinite(m) || !std::isfinite(log_s) ||
-        !std::isfinite(dlog_s) || !std::isfinite(s) ||
-        !std::isfinite(e) || !std::isfinite(de)) {
-      set_bad_kl_(eta, value, grad);
-      return;
-    }
     value = 0.0;
     grad = Eigen::VectorXd::Zero(3);
 
@@ -78,22 +72,16 @@ protected:
 
       t = m + s * sh;
       xi = t * rho + center;
-      if (!std::isfinite(t) || !xi.allFinite()) {
+      if (!xi.allFinite()) {
         set_bad_kl_(eta, value, grad);
         return;
       }
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
-      if (!std::isfinite(logp) || !grad_logp.allFinite()) {
-        set_bad_kl_(eta, value, grad);
-        return;
-      }
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
-      if (!grad_logp.allFinite()) {
-        set_bad_kl_(eta, value, grad);
-        return;
-      }
       line_grad = grad_logp.dot(rho);
-      if (!std::isfinite(line_grad)) {
+      // TODO: does this check prevent any log density gradient checks?
+      // It doesn't seem so to me.
+      if (!std::isfinite(logp) || !std::isfinite(line_grad)) {
         set_bad_kl_(eta, value, grad);
         return;
       }

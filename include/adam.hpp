@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 
@@ -11,10 +12,10 @@ public:
        const double beta1 = 0.9,
        const double beta2 = 0.999,
        const double epsilon = 1e-8) :
-    learning_rate_(learning_rate),
-    beta1_(beta1),
-    beta2_(beta2),
-    epsilon_(epsilon) {}
+    learning_rate_(positive_or_(learning_rate, 0.001)),
+    beta1_(beta_or_(beta1, 0.9)),
+    beta2_(beta_or_(beta2, 0.999)),
+    epsilon_(positive_or_(epsilon, 1e-8)) {}
 
   double step(const double gradient) {
     ++t_;
@@ -33,6 +34,16 @@ public:
   }
 
 private:
+  static double positive_or_(const double value, const double fallback) {
+    return value > 0.0 && std::isfinite(value) ? value : fallback;
+  }
+
+  static double beta_or_(const double value, const double fallback) {
+    const double beta = std::isfinite(value) ? value : fallback;
+    return std::clamp(beta, 0.0,
+                      std::nextafter(1.0, 0.0));
+  }
+
   double learning_rate_;
   double beta1_;
   double beta2_;

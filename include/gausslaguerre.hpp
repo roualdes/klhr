@@ -3,15 +3,14 @@
 #include <Eigen/Dense>
 
 #include <cmath>
-#include <cstddef>
-#include <limits>
 #include <stdexcept>
 
 namespace klhr {
 
 namespace detail {
 
-inline Eigen::VectorXd laguerre_n(const Eigen::VectorXd& x, std::size_t n) {
+inline Eigen::VectorXd laguerre_n(const Eigen::VectorXd& x,
+                                  const Eigen::Index n) {
   if (n == 0) {
     return Eigen::VectorXd::Ones(x.size());
   }
@@ -22,8 +21,8 @@ inline Eigen::VectorXd laguerre_n(const Eigen::VectorXd& x, std::size_t n) {
     return l1;
   }
 
-  for (std::size_t k = 1; k < n; ++k) {
-    const double kd = static_cast<double>(k);
+  for (Eigen::Index k = 1; k < n; ++k) {
+    const double kd = k;
     Eigen::VectorXd l2 =
       ((2.0 * kd + 1.0) * l1 - x.cwiseProduct(l1) - kd * l0) /
       (kd + 1.0);
@@ -35,39 +34,34 @@ inline Eigen::VectorXd laguerre_n(const Eigen::VectorXd& x, std::size_t n) {
 }
 
 inline Eigen::VectorXd laguerre_derivative_n(const Eigen::VectorXd& x,
-                                             std::size_t n) {
+                                             const Eigen::Index n) {
   if (n == 0) {
     return Eigen::VectorXd::Zero(x.size());
   }
 
   const Eigen::VectorXd ln = laguerre_n(x, n);
   const Eigen::VectorXd lm = laguerre_n(x, n - 1);
-  const double nd = static_cast<double>(n);
+  const double nd = n;
   return nd * (ln - lm).cwiseQuotient(x);
 }
 
 }  // namespace detail
 
-inline void gauss_laguerre(std::size_t N, Eigen::VectorXd& ws,
+inline void gauss_laguerre(const Eigen::Index n, Eigen::VectorXd& ws,
                            Eigen::VectorXd& xs) {
-  if (N == 0) {
+  if (n <= 0) {
     throw std::invalid_argument("gauss_laguerre: N must be positive");
   }
 
-  if (N > static_cast<std::size_t>(std::numeric_limits<Eigen::Index>::max())) {
-    throw std::overflow_error("gauss_laguerre: N is too large for Eigen::Index");
-  }
-
-  const Eigen::Index n = static_cast<Eigen::Index>(N);
   ws.resize(n);
   xs.resize(n);
 
   Eigen::MatrixXd companion = Eigen::MatrixXd::Zero(n, n);
   for (Eigen::Index i = 0; i < n; ++i) {
-    companion(i, i) = 2.0 * static_cast<double>(i) + 1.0;
+    companion(i, i) = 2.0 * i + 1.0;
   }
   for (Eigen::Index i = 1; i < n; ++i) {
-    const double a = -static_cast<double>(i);
+    const double a = -i;
     companion(i - 1, i) = a;
     companion(i, i - 1) = a;
   }
@@ -81,13 +75,13 @@ inline void gauss_laguerre(std::size_t N, Eigen::VectorXd& ws,
   Eigen::VectorXd x = solver.eigenvalues();  // sorted increasing
 
   // One Newton refinement step.
-  Eigen::VectorXd dy = detail::laguerre_n(x, N);
-  Eigen::VectorXd df = detail::laguerre_derivative_n(x, N);
+  Eigen::VectorXd dy = detail::laguerre_n(x, n);
+  Eigen::VectorXd df = detail::laguerre_derivative_n(x, n);
   x -= dy.cwiseQuotient(df);
 
   // Compute weights, scaling factors to avoid possible overflow.
-  Eigen::VectorXd fm = detail::laguerre_n(x, N - 1);
-  df = detail::laguerre_derivative_n(x, N);
+  Eigen::VectorXd fm = detail::laguerre_n(x, n - 1);
+  df = detail::laguerre_derivative_n(x, n);
 
   const double fm_max = fm.cwiseAbs().maxCoeff();
   const double df_max = df.cwiseAbs().maxCoeff();
