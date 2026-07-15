@@ -139,13 +139,7 @@ public:
     w_ /= std::sqrt(std::numbers::pi);
 
     const Eigen::Index D = dim();
-    mean_ = Eigen::VectorXd::Zero(D);
-    cov_ = Eigen::VectorXd::Ones(D);
-    eigvecs_ = Eigen::MatrixXd::Zero(D, opts_.J + 1);
-    eigvals_ = Eigen::VectorXd::Ones(opts_.J + 1);
-    projection_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
-    mean_direction_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
-    mean_direction_weights_ = Eigen::VectorXd::Ones(opts_.J);
+    reset_adaptation_to_defaults_(false);
     nfev_ = 0;
     acceptance_rate_ = 0.0;
     Eigen::VectorXd initial_grad = Eigen::VectorXd::Zero(D);
@@ -160,7 +154,7 @@ public:
 
   virtual ~BaseKLHR() = default;
 
-  std::size_t dim() {
+  std::size_t dim() const {
     return bsm_.dim();
   }
 
@@ -189,7 +183,9 @@ public:
       record_proposal_step_(proposal, result.proposal_log_density, nan_(),
                             result.moved, result.moved);
       record_kl_step_(Eigen::VectorXd::Constant(3, nan_()), nan_(), false);
-      adapt_transport_warmup_(draw_);
+      if (draw_ <= opts_.warmup) {
+        (void) windowed_adaptation_.window_closed(draw_);
+      }
       if (draw_ == opts_.initial_transport_steps) {
         apply_transport_handoff_(transport_.finish(rng_, std_normal_));
       }
@@ -329,7 +325,7 @@ protected:
   virtual double overrelaxed_proposal_(const Eigen::VectorXd& eta) = 0;
 
   virtual double transition_density_(const double from, const double to,
-                                     const Eigen::VectorXd& eta) = 0;
+                                     const Eigen::VectorXd& eta) const = 0;
 
   virtual void record_kl_step_(const Eigen::VectorXd& eta, const double xi,
                                const bool accepted) {
@@ -479,6 +475,47 @@ protected:
         relative_log_scale_derivative_(raw(1));
     }
     return out;
+  }
+
+  template <typename EvaluateKl, typename TransformParameters>
+  LineFitResult fit_line_with_kl_fallback_(
+      const Eigen::VectorXd& center,
+      const Eigen::VectorXd& rho,
+      const Eigen::Index parameter_count,
+      EvaluateKl evaluate_kl,
+      TransformParameters transform_parameters) {
+    const LineModeEstimate mode = fit_line_mode_(center, rho);
+    if (mode.success && mode.hessian_usable && !mode.hessian_identity) {
+      return make_laplace_line_fit_result_(mode, parameter_count);
+    }
+
+    Eigen::VectorXd init = Eigen::VectorXd::Zero(parameter_count);
+    init(0) = mode.mode;
+
+    double initial_objective = nan_();
+    double initial_gradient_norm = nan_();
+    bool initial_evaluation_recorded = false;
+    auto kl = [&](const Eigen::VectorXd& eta,
+                  double& value, Eigen::VectorXd& grad) {
+      evaluate_kl(eta, mode.log_scale, value, grad);
+      if (!initial_evaluation_recorded) {
+        initial_objective = value;
+        if (grad.allFinite()) {
+          initial_gradient_norm = grad.lpNorm<Eigen::Infinity>();
+        }
+        initial_evaluation_recorded = true;
+      }
+    };
+
+    bfgs::BfgsResult fit =
+      bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
+                            .xrtol = opts_.gtol});
+    nfev_ += fit.nfev * opts_.N;
+    const Eigen::VectorXd raw =
+      fit.x.size() == parameter_count && fit.x.allFinite() ? fit.x : init;
+    const Eigen::VectorXd eta = transform_parameters(raw, mode.log_scale);
+    return make_line_fit_result_(mode, fit, raw, eta, initial_objective,
+                                 initial_gradient_norm);
   }
 
   static KlhrOptions normalized_options_(KlhrOptions options,
@@ -664,7 +701,7 @@ protected:
     }
   }
 
-  Eigen::VectorXd missing_constrained_draw_() {
+  Eigen::VectorXd missing_constrained_draw_() const {
     return Eigen::VectorXd::Constant(dim(),
                                     std::numeric_limits<double>::quiet_NaN());
   }
@@ -702,8 +739,8 @@ protected:
     const Eigen::Index D = static_cast<Eigen::Index>(dim());
     mean_ = Eigen::VectorXd::Zero(D);
     cov_ = Eigen::VectorXd::Ones(D);
-    eigvecs_ = Eigen::MatrixXd::Zero(D, opts_.J + 1);
-    eigvals_ = Eigen::VectorXd::Ones(opts_.J + 1);
+    eigvecs_ = Eigen::MatrixXd::Zero(D, opts_.J);
+    eigvals_ = Eigen::VectorXd::Ones(opts_.J);
     projection_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
     mean_direction_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
     mean_direction_weights_ = Eigen::VectorXd::Ones(opts_.J);
@@ -726,7 +763,7 @@ protected:
     projected_pair_count_ = 0;
   }
 
-  Eigen::VectorXd metric_scale_() {
+  Eigen::VectorXd metric_scale_() const {
     Eigen::VectorXd scale(dim());
     for (Eigen::Index d = 0; d < scale.size(); ++d) {
       double v = cov_(d);
@@ -902,35 +939,11 @@ protected:
     if (opts_.warmup == 0) {
       return 0;
     }
-    if (opts_.windowsize == 0 || opts_.warmup <= opts_.windowsize) {
+    const auto& closures = windowed_adaptation_.closures();
+    if (closures.size() < 2 || closures.back() != opts_.warmup) {
       return 1;
     }
-
-    const std::size_t scale = std::max<std::size_t>(opts_.windowscale, 1);
-    std::size_t window_size = opts_.windowsize;
-    std::size_t close_window = opts_.windowsize;
-    std::size_t previous_close = 0;
-
-    while (close_window < opts_.warmup) {
-      previous_close = close_window;
-      if (window_size >
-          std::numeric_limits<std::size_t>::max() / scale) {
-        break;
-      }
-      window_size *= scale;
-
-      const std::size_t remaining = opts_.warmup - close_window;
-      const bool next_window_reaches_warmup =
-        window_size > std::numeric_limits<std::size_t>::max() / scale ||
-        scale * window_size >= remaining;
-      if (next_window_reaches_warmup) {
-        close_window = opts_.warmup;
-      } else {
-        close_window += window_size;
-      }
-    }
-
-    return previous_close + 1;
+    return closures[closures.size() - 2] + 1;
   }
 
   bool set_projection_basis_from_online_pca_() {
@@ -957,9 +970,9 @@ protected:
     return true;
   }
 
-  bool set_mean_direction_from_online_pca_(const bool whitened = false) {
+  void set_mean_direction_from_online_pca_(const bool whitened = false) {
     if (opts_.J <= 0 || online_pca_.count() < static_cast<std::size_t>(opts_.J)) {
-      return false;
+      return;
     }
 
     Eigen::MatrixXd basis = online_pca_.vectors();
@@ -969,7 +982,7 @@ protected:
         weights.size() < opts_.J ||
         !basis.allFinite() ||
         !weights.allFinite()) {
-      return false;
+      return;
     }
 
     mean_direction_basis_ = basis.leftCols(opts_.J);
@@ -979,13 +992,12 @@ protected:
       if (!std::isfinite(norm) || norm <= opts_.tol) {
         mean_direction_ready_ = false;
         mean_direction_whitened_ = false;
-        return false;
+        return;
       }
       mean_direction_basis_.col(j) /= norm;
     }
     mean_direction_ready_ = true;
     mean_direction_whitened_ = whitened;
-    return true;
   }
 
   void update_projected_moments_(const Eigen::VectorXd& theta) {
@@ -1001,15 +1013,15 @@ protected:
     }
   }
 
-  bool activate_projected_pair_() {
+  void activate_projected_pair_() {
     if (!projection_basis_ready_ || opts_.J <= 0 ||
         projected_moments_.count() <= 2) {
-      return false;
+      return;
     }
 
     Eigen::VectorXd variances = projected_moments_.variance();
     if (variances.size() != opts_.J) {
-      return false;
+      return;
     }
     for (Eigen::Index j = 0; j < variances.size(); ++j) {
       if (!std::isfinite(variances(j)) || variances(j) <= opts_.tol) {
@@ -1021,7 +1033,6 @@ protected:
     eigvals_.head(opts_.J) = variances;
     ++projected_pair_count_;
     lowrank_ready_ = projected_pair_count_ >= 2;
-    return true;
   }
 
   void freeze_pca_for_final_calibration_() {
@@ -1030,7 +1041,7 @@ protected:
     }
 
     const bool frozen = set_projection_basis_from_online_pca_();
-    (void) set_mean_direction_from_online_pca_();
+    set_mean_direction_from_online_pca_();
     if (!frozen && projected_pair_count_ > 0) {
       projection_basis_ = eigvecs_.leftCols(opts_.J);
       projection_basis_ready_ = projection_basis_.allFinite();
@@ -1047,7 +1058,6 @@ protected:
     log_density_ = handoff.state.log_density;
     if (handoff.rollback) {
       reset_adaptation_to_defaults_(true);
-      online_pca_.reset();
       return;
     }
 
@@ -1072,13 +1082,6 @@ protected:
       mean_direction_whitened_ = false;
     }
     online_pca_.reset();
-  }
-
-  void adapt_transport_warmup_(const std::size_t adaptation_draw) {
-    if (adaptation_draw == 0 || adaptation_draw > opts_.warmup) {
-      return;
-    }
-    (void) windowed_adaptation_.window_closed(adaptation_draw);
   }
 
   void adapt_warmup_(const Eigen::VectorXd& theta,
@@ -1107,9 +1110,9 @@ protected:
       online_moments_.reset();
 
       if (calibrate_pca && !pca_frozen_) {
-        (void) activate_projected_pair_();
+        activate_projected_pair_();
         const bool has_next_basis = set_projection_basis_from_online_pca_();
-        (void) set_mean_direction_from_online_pca_();
+        set_mean_direction_from_online_pca_();
         projected_moments_.reset();
         if (!has_next_basis) {
           projection_basis_ready_ = false;
@@ -1127,10 +1130,6 @@ protected:
   void set_bad_kl_(const Eigen::VectorXd& eta, double& value,
                    Eigen::VectorXd& grad) const {
     numerics::set_bad_kl(eta, value, grad);
-  }
-
-  static constexpr double bad_kl_value_() {
-    return numerics::bad_kl_value();
   }
 
   double relative_log_scale_(const double raw, const double log_s0) const {

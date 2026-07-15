@@ -1,22 +1,16 @@
 #pragma once
 
 #include "base_klhr.hpp"
-#include "bfgs.hpp"
 #include "normal_quantile.hpp"
 
-#include <limits>
-#include <string>
 #include <tuple>
-#include <utility>
 #include <vector>
 
 namespace klhr {
 
 class SASKLHR : public BaseKLHR {
 public:
-  SASKLHR(std::string stan_file, std::string json_file,
-          const KlhrOptions& options = KlhrOptions{}) :
-    BaseKLHR(stan_file, json_file, options) {}
+  using BaseKLHR::BaseKLHR;
 
   const std::vector<double>& sas_location_history() const {
     return sas_location_;
@@ -49,7 +43,7 @@ public:
 protected:
   void record_kl_step_(const Eigen::VectorXd& eta, const double xi,
                        const bool accepted) override {
-    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double nan = nan_();
     const bool valid_eta = eta.size() >= 3 && eta.allFinite();
     const bool valid_xi = std::isfinite(xi);
     const double scale = valid_eta ? scale_from_log_(eta(1)) : nan;
@@ -64,39 +58,19 @@ protected:
 
   LineFitResult fit_line_(const Eigen::VectorXd& center,
                           const Eigen::VectorXd& rho) override {
-    const LineModeEstimate mode = fit_line_mode_(center, rho);
-    if (mode.success && mode.hessian_usable && !mode.hessian_identity) {
-      return make_laplace_line_fit_result_(mode, 3);
-    }
-
-    Eigen::VectorXd init(3);
-    init << mode.mode, 0.0, 0.0;
-
-    double initial_objective = std::numeric_limits<double>::quiet_NaN();
-    double initial_gradient_norm = std::numeric_limits<double>::quiet_NaN();
-    bool initial_evaluation_recorded = false;
-    auto kl = [&, this](const Eigen::VectorXd& eta,
-                        double& value, Eigen::VectorXd& grad) {
-      KL_(eta, center, rho, mode.log_scale, value, grad);
-      if (!initial_evaluation_recorded) {
-        initial_objective = value;
-        if (grad.allFinite()) {
-          initial_gradient_norm = grad.lpNorm<Eigen::Infinity>();
-        }
-        initial_evaluation_recorded = true;
-      }
-    };
-    bfgs::BfgsResult o =
-      bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
-                            .xrtol = opts_.gtol});
-    nfev_ += o.nfev * opts_.N;
-    const Eigen::VectorXd raw =
-      o.x.size() == 3 && o.x.allFinite() ? o.x : init;
-    Eigen::VectorXd out(3);
-    out << raw(0), relative_log_scale_(raw(1), mode.log_scale),
-      bounded_skew_(raw(2));
-    return make_line_fit_result_(mode, o, raw, out, initial_objective,
-                                 initial_gradient_norm);
+    return fit_line_with_kl_fallback_(
+      center, rho, 3,
+      [this, &center, &rho](const Eigen::VectorXd& eta,
+                            const double log_scale,
+                            double& value, Eigen::VectorXd& grad) {
+        KL_(eta, center, rho, log_scale, value, grad);
+      },
+      [this](const Eigen::VectorXd& raw, const double log_scale) {
+        Eigen::VectorXd eta(3);
+        eta << raw(0), relative_log_scale_(raw(1), log_scale),
+          bounded_skew_(raw(2));
+        return eta;
+      });
   }
 
   double overrelaxed_proposal_(const Eigen::VectorXd& eta) override {
@@ -105,14 +79,17 @@ protected:
   }
 
   double transition_density_(const double from, const double to,
-                             const Eigen::VectorXd& eta) override {
+                             const Eigen::VectorXd& eta) const override {
     auto [m, s, e] = unpack_sas_(eta);
     return sas_transition_density_(from, to, m, s, e);
   }
 
-  void KL_(const Eigen::VectorXd& eta, const Eigen::VectorXd& center,
-                      const Eigen::VectorXd& rho, const double log_s0,
-                      double& value, Eigen::VectorXd& grad) {
+  void KL_(const Eigen::VectorXd& eta,
+           const Eigen::VectorXd& center,
+           const Eigen::VectorXd& rho,
+           const double log_s0,
+           double& value,
+           Eigen::VectorXd& grad) {
     const double m = eta(0);
     const double log_s = relative_log_scale_(eta(1), log_s0);
     const double dlog_s = relative_log_scale_derivative_(eta(1));
@@ -174,7 +151,8 @@ protected:
     grad(2) *= de;
   }
 
-  double sas_log_q_(const double x, const double m, const double s, const double e) {
+  double sas_log_q_(const double x, const double m, const double s,
+                    const double e) const {
     const double z = (x - m) / s;
     const double y = std::asinh(z) - e;
     const double sh = sinh_clipped_(y);
@@ -185,7 +163,8 @@ protected:
   }
 
   double sas_transition_density_(const double from, const double to,
-                                 const double m, const double s, const double e) {
+                                 const double m, const double s,
+                                 const double e) const {
     const double ss = std::max(s, opts_.tol);
     const double log_density = sas_log_q_(to, m, ss, e);
     if (opts_.K == 0) {
@@ -203,17 +182,20 @@ protected:
     return T_(normal_quantile_(clamp_probability_(up)), m, ss, e);
   }
 
-  double T_(const double normal_draw, const double m, const double s, const double e) {
+  double T_(const double normal_draw, const double m, const double s,
+            const double e) const {
     const double z = sinh_clipped_(std::asinh(normal_draw) + e);
     return m + s * z;
   }
 
-  double Tinv_(const double x, const double m, const double s, const double e) {
+  double Tinv_(const double x, const double m, const double s,
+               const double e) const {
     const double z = (x - m) / s;
     return sinh_clipped_(std::asinh(z) - e);
   }
 
-  std::tuple<double, double, double> unpack_sas_(const Eigen::VectorXd& eta) {
+  std::tuple<double, double, double>
+  unpack_sas_(const Eigen::VectorXd& eta) const {
     const double m = eta(0);
     const double s = scale_from_log_(eta(1));
     const double e = eta(2);
