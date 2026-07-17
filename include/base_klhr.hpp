@@ -127,10 +127,7 @@ public:
     ++draw_;
     if (draw_ <= opts_.initial_transport_steps) {
       auto result = transport_.step(
-        bsm_, rng_, std_uniform_, std_normal_,
-        [this](const Eigen::VectorXd& theta) {
-          return bsm_.param_constrain(theta);
-        });
+        bsm_, rng_, std_uniform_, std_normal_);
       nfev_ += result.evaluations;
       theta_ = result.state.theta;
       log_density_ = result.state.log_density;
@@ -311,7 +308,7 @@ protected:
   static ReflectedTransportOptions transport_options_(
       const KlhrOptions& options) {
     return {
-      .quadrature_size = options.N,
+      .N = options.N,
       .pca_rank = options.J,
       .tol = options.tol,
       .grad_clip = options.grad_clip,

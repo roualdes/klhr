@@ -21,8 +21,7 @@
 namespace klhr {
 
 struct ReflectedTransportOptions {
-  // TODO: rename to N, to match naming in BaseKLHR
-  Eigen::Index quadrature_size = 8;
+  Eigen::Index N = 8;
   Eigen::Index pca_rank = 1;
   double tol = 1e-10;
   double grad_clip = std::numeric_limits<double>::infinity();
@@ -79,7 +78,7 @@ public:
     handoff_basis_(Eigen::MatrixXd::Zero(dim_, opts_.pca_rank)),
     handoff_weights_(Eigen::VectorXd::Zero(opts_.pca_rank)),
     distance_(opts_.initial_distance) {
-    gauss_laguerre(opts_.quadrature_size, laguerre_weights_, laguerre_nodes_);
+    gauss_laguerre(opts_.N, laguerre_weights_, laguerre_nodes_);
     if (!laguerre_weights_.allFinite() || !laguerre_nodes_.allFinite() ||
         (laguerre_nodes_.array() <= 0.0).any()) {
       throw std::runtime_error("invalid Gauss-Laguerre quadrature");
@@ -121,12 +120,10 @@ public:
     initialized_ = valid_initial;
   }
 
-  template <typename Constrain>
   StepResult step(mcmcpp::bsmodel& model,
                   mcmcpp::rng& rng,
                   std::uniform_real_distribution<double>& standard_uniform,
-                  std::normal_distribution<double>& standard_normal,
-                  Constrain&& constrain) {
+                  std::normal_distribution<double>& standard_normal) {
     StepResult result;
     result.state = state_;
 
@@ -140,19 +137,13 @@ public:
     const Eigen::VectorXd direction0 =
       normalized_direction_(rng, standard_normal);
 
-    // TODO: are all these checks necessary on every step?
-    if (!start.theta.allFinite() || !start.grad.allFinite() ||
-        !scale.allFinite() || !std::isfinite(start.log_density) ||
-        !direction0.allFinite()) {
+    if (!direction0.allFinite()) {
       regularize_direction_(rng, standard_normal);
-      result.state = state_;
       return result;
     }
 
     State current = start;
-    State endpoint = current;
     Eigen::VectorXd direction = direction0;
-    Eigen::VectorXd endpoint_direction = direction0;
     bool moved = false;
     bool failed = false;
 
@@ -160,19 +151,17 @@ public:
          reflection < opts_.max_reflections; ++reflection) {
       const Eigen::VectorXd rho =
         (scale.array() * direction.array()).matrix();
-      Eigen::VectorXd eta = fit_ray_(model, current.theta, rho,
-                                     result.evaluations);
+      const Eigen::VectorXd eta = fit_ray_(model, current.theta, rho,
+                                           result.evaluations);
       double distance = distance_proposal_(eta, rng, standard_uniform);
-      // EAR: check distance_proposal_, do these checks happen internally?
-      if (!eta.allFinite() || !(distance > 0.0) ||
-          !std::isfinite(distance)) {
+      if (!std::isfinite(distance)) {
         failed = true;
         break;
       }
       distance = std::clamp(distance, opts_.min_distance, opts_.max_distance);
 
-      State next = ray_step_(model, current, distance, rho,
-                             result.evaluations);
+      const State next = ray_step_(model, current, distance, rho,
+                                   result.evaluations);
       if (!next.valid) {
         failed = true;
         break;
@@ -200,39 +189,25 @@ public:
         break;
       }
 
-      // TODO: will you double check why we have endpoint and current?
-      // when do their values differ?
-      endpoint = next;
       current = next;
       moved = true;
       distance_ = distance;
 
       const Eigen::VectorXd reflected =
-        reflected_direction_(direction, endpoint.grad, scale);
+        reflected_direction_(direction, current.grad, scale);
       if (!reflected.allFinite()) {
         break;
       }
       direction = reflected;
-      endpoint_direction = direction;
     }
 
     if (moved) {
-      // TODO: can it be the case that endoint.theta is finite
-      // but constrain(endpoint.theta) is not?
-      // If this isn't likely, then I'd just check endpoint.theta
-      // for being finite, and in fact that might already happen
-      // when next is set, thus negating this check for finite-ness entirely.
-      Eigen::VectorXd proposal = constrain(endpoint.theta);
-      if (!proposal.allFinite()) {
-        moved = false;
-      } else {
-        state_ = endpoint;
-        update_covariance_(state_.theta);
-        update_best_state_();
-      }
+      state_ = current;
+      update_covariance_(state_.theta);
+      update_best_state_();
     }
 
-    update_direction_(moved, failed, endpoint_direction, direction0,
+    update_direction_(moved, failed, direction, direction0,
                       rng, standard_normal);
 
     result.state = state_;
@@ -274,8 +249,7 @@ private:
 
   static ReflectedTransportOptions normalize_options_(
       ReflectedTransportOptions options, const Eigen::Index dim) {
-    options.quadrature_size =
-      std::max<Eigen::Index>(1, options.quadrature_size);
+    options.N = std::max<Eigen::Index>(1, options.N);
     options.pca_rank = std::clamp(options.pca_rank, Eigen::Index{0}, dim);
     if (!(options.tol > 0.0) || !std::isfinite(options.tol)) {
       options.tol = 1e-10;
@@ -355,14 +329,9 @@ private:
       bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
                             .xrtol = opts_.gtol,
                             .maxiter_bfgs = 4});
-    // TODO: instead of laguerre_nodes_.size(), let's use opts_.N
-    evaluations += result.nfev * laguerre_nodes_.size();
+    evaluations += result.nfev * opts_.N;
 
-    // TODO: no need to check the size, it will always be 2.
-    // TODO: will result.x every be non-finite? At worst, bad_kl_value
-    // will be returned, which is finite. Can't we ditch that check too?
-    const Eigen::VectorXd raw =
-      result.x.size() == 2 && result.x.allFinite() ? result.x : init;
+    const Eigen::VectorXd raw = result.x.allFinite() ? result.x : init;
     Eigen::VectorXd out(2);
     out << bounded_log_shape_(raw(0)),
       relative_log_scale_(raw(1), log_scale0);
@@ -399,13 +368,6 @@ private:
     State out;
     out.theta = Eigen::VectorXd::Constant(dim_, nan_());
     out.grad = Eigen::VectorXd::Constant(dim_, nan_());
-    // TODO: are all these checks necessary each ray_step_?
-    if (!state.valid || !(distance > 0.0) || !std::isfinite(distance) ||
-        !state.theta.allFinite() || !state.grad.allFinite() ||
-        !rho.allFinite()) {
-      return out;
-    }
-
     out.theta = state.theta + distance * rho;
     if (!out.theta.allFinite()) {
       return out;
@@ -432,20 +394,13 @@ private:
     const double log_scale = relative_log_scale_(eta(1), log_scale0);
     const double dlog_scale = relative_log_scale_derivative_(eta(1));
     const double scale = scale_from_log_(log_scale);
-    if (!std::isfinite(log_shape) || !std::isfinite(dlog_shape) ||
-        !std::isfinite(shape) || !std::isfinite(log_scale) ||
-        !std::isfinite(dlog_scale) || !std::isfinite(scale) ||
-        !center.allFinite() || !rho.allFinite()) {
-      set_bad_kl_(eta, value, grad);
-      return;
-    }
 
     value = 0.0;
     grad = Eigen::VectorXd::Zero(2);
     Eigen::VectorXd xi(dim_);
     Eigen::VectorXd grad_logp(dim_);
     const double inv_shape = 1.0 / shape;
-    for (Eigen::Index n = 0; n < laguerre_nodes_.size(); ++n) {
+    for (Eigen::Index n = 0; n < opts_.N; ++n) {
       const double xn = laguerre_nodes_(n);
       const double wn = laguerre_weights_(n);
       const double log_x = std::log(xn);
@@ -453,35 +408,17 @@ private:
         std::exp(std::clamp(inv_shape * log_x, -700.0, 700.0));
       const double distance = scale * x_power;
       xi = center + distance * rho;
-      // TODO: shouldn't these checks be on xi, since that's what's going into
-      // model.log_density_gradient_noe?
-      // But in general, these are good checks because they might prevent
-      // log density gradient calculations
-      if (!(distance > 0.0) || !std::isfinite(distance) || !xi.allFinite()) {
+      if (!xi.allFinite()) {
         set_bad_kl_(eta, value, grad);
         return;
       }
 
       double logp;
       model.log_density_gradient_noe(xi, logp, grad_logp);
-
-      // TODO: necessary checks?
-      if (!std::isfinite(logp) || !grad_logp.allFinite()) {
-        set_bad_kl_(eta, value, grad);
-        return;
-      }
       grad_logp =
         grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
-      // TODO: necessary checks?
-      if (!grad_logp.allFinite()) {
-        set_bad_kl_(eta, value, grad);
-        return;
-      }
-
       const double line_grad = grad_logp.dot(rho);
-      // TOOD: doesn't this one check encapsulate the previous two checks,
-      // since it takes into account rho and grad_logp?
-      if (!std::isfinite(line_grad)) {
+      if (!std::isfinite(logp) || !std::isfinite(line_grad)) {
         set_bad_kl_(eta, value, grad);
         return;
       }
@@ -503,12 +440,6 @@ private:
   Eigen::VectorXd reflected_direction_(const Eigen::VectorXd& direction,
                                        const Eigen::VectorXd& grad,
                                        const Eigen::VectorXd& scale) const {
-    // TOOD: it seems like we are checking direction in every method?
-    // maybe I'm imagining this. But can't we just check it after it's produced,
-    // or after it is reflected and then be done with the extra checks?
-    if (!direction.allFinite() || !grad.allFinite() || !scale.allFinite()) {
-      return Eigen::VectorXd::Constant(dim_, nan_());
-    }
     Eigen::VectorXd normal = (scale.array() * grad.array()).matrix();
     const double normal_norm = normal.norm();
     if (!std::isfinite(normal_norm) || normal_norm <= opts_.tol) {
@@ -518,8 +449,6 @@ private:
     Eigen::VectorXd reflected =
       direction - 2.0 * direction.dot(normal) * normal;
     const double reflected_norm = reflected.norm();
-    // TODO: doesn't this check encapsulate the check before it,
-    // thus making the check before this obsolete?
     if (!std::isfinite(reflected_norm) || reflected_norm <= opts_.tol) {
       return Eigen::VectorXd::Constant(dim_, nan_());
     }
@@ -531,24 +460,20 @@ private:
       std::normal_distribution<double>& standard_normal) {
     const double a = opts_.direction_persistence;
     const double b = std::sqrt(std::max(0.0, 1.0 - a * a));
-    if (!direction_.allFinite()) {
-      direction_ = normal_rng_(dim_, rng, standard_normal);
-    } else {
-      direction_ = a * direction_ +
-        b * normal_rng_(dim_, rng, standard_normal);
-    }
+    direction_ = a * direction_ +
+      b * normal_rng_(dim_, rng, standard_normal);
     regularize_direction_(rng, standard_normal);
   }
 
   void update_direction_(const bool moved,
                          const bool failed,
-                         const Eigen::VectorXd& endpoint_direction,
+                         const Eigen::VectorXd& final_direction,
                          const Eigen::VectorXd& initial_direction,
                          mcmcpp::rng& rng,
                          std::normal_distribution<double>& standard_normal) {
     const double decay = opts_.failure_direction_decay;
-    if (moved && endpoint_direction.allFinite()) {
-      direction_ = endpoint_direction;
+    if (moved && final_direction.allFinite()) {
+      direction_ = final_direction;
       if (failed) {
         direction_ *= decay;
       }
@@ -558,47 +483,41 @@ private:
     regularize_direction_(rng, standard_normal);
   }
 
-  void regularize_direction_(
+  double regularize_direction_(
       mcmcpp::rng& rng,
       std::normal_distribution<double>& standard_normal) {
-    if (!direction_.allFinite()) {
-      direction_ = normal_rng_(dim_, rng, standard_normal);
-    }
-    // TODO: Can't we just check the norm for finite-ness?
-    // Doesn't that imply allFinite()? Such that this if statement
-    // will make useless the previous if statement?
-    const double norm = direction_.norm();
+    double norm = direction_.norm();
     if (!std::isfinite(norm) || norm <= opts_.tol) {
       direction_ = normal_rng_(dim_, rng, standard_normal);
+      norm = direction_.norm();
     }
+    return norm;
   }
 
-  // TODO: do we really need both normalized_direction_ and regularize_direction_?
-  // Can't these be brought together?
   Eigen::VectorXd normalized_direction_(
       mcmcpp::rng& rng,
       std::normal_distribution<double>& standard_normal) {
-    regularize_direction_(rng, standard_normal);
-    const double norm = direction_.norm();
+    const double norm = regularize_direction_(rng, standard_normal);
     if (!std::isfinite(norm) || norm <= opts_.tol) {
       return Eigen::VectorXd::Constant(dim_, nan_());
     }
     return direction_ / norm;
   }
 
-  // TODO: this looks like it's the same thing as
-  // base_klhr.hpp's diagonal_variance_()
-  // if so, they should be identical in name and form, right?
-  Eigen::VectorXd metric_scale_() const {
-    Eigen::VectorXd scale(dim_);
-    for (Eigen::Index d = 0; d < dim_; ++d) {
-      double variance = covariance_(d);
-      if (!std::isfinite(variance) || variance <= opts_.tol) {
-        variance = 1.0;
+  Eigen::VectorXd diagonal_variance_() const {
+    Eigen::VectorXd variance = covariance_;
+    for (Eigen::Index d = 0; d < variance.size(); ++d) {
+      if (!std::isfinite(variance(d)) || variance(d) <= 0.0) {
+        variance(d) = 1.0;
+      } else {
+        variance(d) = std::max(variance(d), opts_.tol);
       }
-      scale(d) = std::sqrt(variance);
     }
-    return scale;
+    return variance;
+  }
+
+  Eigen::VectorXd metric_scale_() const {
+    return diagonal_variance_().array().sqrt().matrix();
   }
 
   void update_covariance_(const Eigen::VectorXd& theta) {
