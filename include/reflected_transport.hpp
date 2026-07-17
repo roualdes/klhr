@@ -26,6 +26,7 @@ struct ReflectedTransportOptions {
   double tol = 1e-10;
   double grad_clip = std::numeric_limits<double>::infinity();
   double gtol = 1e-3;
+  std::size_t maxiter_bfgs = 8;
   double pca_l = 0.0;
   double covariance_shrink = 0.25;
   double covariance_ratio_cap = 4.0;
@@ -250,6 +251,7 @@ private:
   static ReflectedTransportOptions normalize_options_(
       ReflectedTransportOptions options, const Eigen::Index dim) {
     options.N = std::max<Eigen::Index>(1, options.N);
+    options.maxiter_bfgs = std::max<std::size_t>(1, options.maxiter_bfgs);
     options.pca_rank = std::clamp(options.pca_rank, Eigen::Index{0}, dim);
     if (!(options.tol > 0.0) || !std::isfinite(options.tol)) {
       options.tol = 1e-10;
@@ -328,7 +330,7 @@ private:
     bfgs::BfgsResult result =
       bfgs::bfgs(kl, init, {.gtol = opts_.gtol,
                             .xrtol = opts_.gtol,
-                            .maxiter_bfgs = 4});
+                            .maxiter_bfgs = opts_.maxiter_bfgs});
     evaluations += result.nfev * opts_.N;
 
     const Eigen::VectorXd raw = result.x.allFinite() ? result.x : init;

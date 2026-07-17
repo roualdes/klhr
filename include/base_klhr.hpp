@@ -34,6 +34,7 @@ struct KlhrOptions {
   double grad_clip = positive_infinity;
   double sas_arg_clip = 30;
   double gtol = 1e-3;
+  std::size_t transport_maxiter_bfgs = 8;
   std::size_t K = 16;
   std::size_t warmup = 1'000;
   std::size_t windowsize = 50;
@@ -313,6 +314,7 @@ protected:
       .tol = options.tol,
       .grad_clip = options.grad_clip,
       .gtol = options.gtol,
+      .maxiter_bfgs = options.transport_maxiter_bfgs,
       .pca_l = options.l,
       .covariance_shrink = options.transport_cov_shrink,
       .covariance_ratio_cap = options.transport_cov_ratio_cap,

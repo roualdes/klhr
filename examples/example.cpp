@@ -3,6 +3,8 @@
 
 #include <CLI/CLI.hpp>
 #include <Eigen/Dense>
+#include <highfive/highfive.hpp>
+#include <highfive/eigen.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -160,16 +162,44 @@ int main(int argc, char** argv) {
     .transport_failure_direction_decay = transport_failure_direction_decay,
   };
 
+
   auto run_sampler = [&](auto& algo) {
-    Eigen::VectorXd draw;
+
+    Eigen::Index D = algo.dim();
+    Eigen::MatrixXd draws(num_iterations, D);
+    Eigen::VectorXd acceptance_rate(num_iterations);
+    Eigen::VectorXd log_density(num_iterations);
+    Eigen::VectorXd nfev(num_iterations);
+
+    Eigen::VectorXd draw(D);
+
+    mcmcpp::WelfordAccumulator w{algo.dim()};
     for (std::size_t n = 0; n < num_iterations; ++n) {
       draw = algo.draw();
+      draws.row(n) = draw;
+      acceptance_rate(n) = algo.acceptance_rate_;
+      log_density(n) = algo.log_density_;
+      nfev(n) = algo.nfev_;
+      if (n >= num_warmup) {
+        w.update(draw);
+      }
     }
 
     std::cout << "Seed: " << algo.seed() << '\n';
-    std::cout << "Final draw: " << draw.transpose() << '\n';
+    std::cout << "mean: " << w.mean().transpose() << '\n';
+    std::cout << "std: " << w.std().transpose() << '\n';
     std::cout << "Number log_density evals: " << algo.nfev_ << '\n';
     std::cout << "Acceptance rate: " << algo.acceptance_rate_ << '\n';
+
+    HighFive::File h5("draws/experiments.h5", HighFive::File::Truncate);
+
+    h5.createGroup(model_name);
+    h5.createDataSet(std::format("{}/seed", model_name),
+                     std::to_string(algo.seed()));
+    h5.createDataSet(std::format("{}/draws", model_name), draws);
+    h5.createDataSet(std::format("{}/acceptance_rate", model_name), acceptance_rate);
+    h5.createDataSet(std::format("{}/log_density", model_name), log_density);
+    h5.createDataSet(std::format("{}/nfev", model_name), nfev);
 
     return 0;
   };

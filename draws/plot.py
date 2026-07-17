@@ -75,10 +75,10 @@ def earnings(tbl, model):
 
     scatter_plot(draws[:, 0], draws[:, 1], f"draws/{model}_scatter_plot.png")
 
-    if "sas_location" in tbl:
-        eta_sas(tbl, model)
-    else:
-        eta_normal(tbl, model)
+    # if "sas_location" in tbl:
+    #     eta_sas(tbl, model)
+    # else:
+    #     eta_normal(tbl, model)
 
 def funnel(tbl, model):
     draws = np.asarray(tbl["draws"])
