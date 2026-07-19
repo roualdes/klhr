@@ -22,7 +22,7 @@ namespace klhr {
 
 struct ReflectedTransportOptions {
   Eigen::Index N = 8;
-  Eigen::Index pca_rank = 1;
+  Eigen::Index J = 1;
   double tol = 1e-10;
   double grad_clip = std::numeric_limits<double>::infinity();
   double gtol = 1e-3;
@@ -71,13 +71,13 @@ public:
     dim_(checked_dimension_(dim)),
     opts_(normalize_options_(std::move(options), dim_)),
     moments_(dim_),
-    pca_(dim_, opts_.pca_rank, opts_.pca_l, opts_.tol),
+    pca_(dim_, opts_.J, opts_.pca_l, opts_.tol),
     covariance_(Eigen::VectorXd::Ones(dim_)),
     smooth_mean_(Eigen::VectorXd::Zero(dim_)),
-    mean_direction_basis_(Eigen::MatrixXd::Zero(dim_, opts_.pca_rank)),
-    mean_direction_weights_(Eigen::VectorXd::Ones(opts_.pca_rank)),
-    handoff_basis_(Eigen::MatrixXd::Zero(dim_, opts_.pca_rank)),
-    handoff_weights_(Eigen::VectorXd::Zero(opts_.pca_rank)),
+    mean_direction_basis_(Eigen::MatrixXd::Zero(dim_, opts_.J)),
+    mean_direction_weights_(Eigen::VectorXd::Ones(opts_.J)),
+    handoff_basis_(Eigen::MatrixXd::Zero(dim_, opts_.J)),
+    handoff_weights_(Eigen::VectorXd::Zero(opts_.J)),
     distance_(opts_.initial_distance) {
     gauss_laguerre(opts_.N, laguerre_weights_, laguerre_nodes_);
     if (!laguerre_weights_.allFinite() || !laguerre_nodes_.allFinite() ||
@@ -252,7 +252,7 @@ private:
       ReflectedTransportOptions options, const Eigen::Index dim) {
     options.N = std::max<Eigen::Index>(1, options.N);
     options.maxiter_bfgs = std::max<std::size_t>(1, options.maxiter_bfgs);
-    options.pca_rank = std::clamp(options.pca_rank, Eigen::Index{0}, dim);
+    options.J = std::clamp(options.J, Eigen::Index{0}, dim);
     if (!(options.tol > 0.0) || !std::isfinite(options.tol)) {
       options.tol = 1e-10;
     }
@@ -581,7 +581,7 @@ private:
   }
 
   void update_mean_direction_basis_(const Eigen::VectorXd& theta) {
-    if (opts_.pca_rank <= 0 || !theta.allFinite() ||
+    if (opts_.J <= 0 || !theta.allFinite() ||
         moments_.count() < 2 || !smooth_mean_.allFinite()) {
       return;
     }
@@ -594,7 +594,7 @@ private:
   }
 
   bool set_mean_direction_from_pca_() {
-    if (opts_.pca_rank <= 0 || pca_.count() < opts_.pca_rank) {
+    if (opts_.J <= 0 || pca_.count() < opts_.J) {
       return false;
     }
     const Eigen::MatrixXd basis = pca_.vectors();
@@ -603,9 +603,9 @@ private:
       return false;
     }
 
-    mean_direction_basis_ = basis.leftCols(opts_.pca_rank);
+    mean_direction_basis_ = basis.leftCols(opts_.J);
     mean_direction_weights_ =
-      weights.head(opts_.pca_rank).cwiseMax(opts_.tol);
+      weights.head(opts_.J).cwiseMax(opts_.tol);
     for (Eigen::Index j = 0; j < mean_direction_basis_.cols(); ++j) {
       const double norm = mean_direction_basis_.col(j).norm();
       if (!std::isfinite(norm) || norm <= opts_.tol) {

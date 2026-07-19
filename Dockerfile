@@ -30,7 +30,7 @@ RUN git clone \
         https://github.com/roualdes/bridgestan.git \
         /app/bridgestan
 
-COPY . /app/klhr
+COPY stan/*.stan /app/klhr/stan/
 
 RUN make \
         -C /app/bridgestan \
@@ -48,6 +48,8 @@ RUN make \
         /app/klhr/stan/rosenbrock_model.so \
         /app/klhr/stan/ssp3nc3r_2_model.so \
         /app/klhr/stan/ssp3nc3r_model.so
+
+COPY . /app/klhr
 
 # Collect BridgeStan's matching TBB runtime library.
 RUN set -eux; \
@@ -119,8 +121,11 @@ RUN set -eux; \
         fi; \
     done
 
-RUN chown -R 10001:10001 /app/klhr
+RUN chmod -R a+rX /app/klhr/stan \
+    && mkdir -p /app/klhr/output \
+    && chown 10001:10001 /app/klhr/output
 
+# Safe default for standalone container execution.
 USER 10001:10001
 
 ENTRYPOINT ["/usr/local/bin/klhr-experiment"]

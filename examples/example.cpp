@@ -3,6 +3,7 @@
 #include "normal_klhr.hpp"
 #include "sas_klhr.hpp"
 #include "slice.hpp"
+#include "stan.hpp"
 
 #include <CLI/CLI.hpp>
 #include <Eigen/Dense>
@@ -23,8 +24,8 @@ int main(int argc, char** argv) {
   std::size_t num_iterations = 30'000;
   std::string model_name = "earnings";
   std::string sampler = "sas";
-  Eigen::Index pca_basis = klhr::KlhrOptions{}.J;
-  Eigen::Index direction_noise_rank = klhr::KlhrOptions{}.direction_noise_rank;
+  Eigen::Index J = klhr::KlhrOptions{}.J;
+  double target_accept = 0.8;
   double direction_lowrank_weight = klhr::KlhrOptions{}.direction_lowrank_weight;
   double direction_min_diag_fraction =
     klhr::KlhrOptions{}.direction_min_diag_fraction;
@@ -65,16 +66,18 @@ int main(int argc, char** argv) {
                    "Stan model name");
 
     app.add_option("--sampler", sampler,
-                   "Sampling algorithm: sas, normal, slice, barker, or mala")
-      ->check(CLI::IsMember({"sas", "normal", "slice", "barker", "mala"}));
+                   "Sampling algorithm: sas, normal, slice, barker, mala, or stan")
+      ->check(CLI::IsMember(
+        {"sas", "normal", "slice", "barker", "mala", "stan"}));
 
-    app.add_option("--pca-basis", pca_basis,
-                   "Number of PCA basis vectors to learn")
-      ->default_val(pca_basis);
+    app.add_option("--J", J,
+                   "Number of PCA directions to learn and use")
+      ->default_val(J)
+      ->check(CLI::NonNegativeNumber);
 
-    app.add_option("--direction-noise-rank", direction_noise_rank,
-                   "Rank of learned PCA covariance used in regular direction noise (negative => J)")
-      ->default_val(direction_noise_rank);
+    app.add_option("--target_accept", target_accept)
+      ->default_val(0.8)
+      ->check(CLI::PositiveNumber);
 
     app.add_option("--direction-lowrank-weight", direction_lowrank_weight,
                    "Weight for learned low-rank covariance in regular direction noise")
@@ -147,8 +150,7 @@ int main(int argc, char** argv) {
   klhr::KlhrOptions klhr_options = {
     .seed = seed,
     .warmup = num_warmup,
-    .J = pca_basis,
-    .direction_noise_rank = direction_noise_rank,
+    .J = J,
     .direction_lowrank_weight = direction_lowrank_weight,
     .direction_min_diag_fraction = direction_min_diag_fraction,
     .lowrank_during_warmup = lowrank_during_warmup,
@@ -174,6 +176,29 @@ int main(int argc, char** argv) {
     Eigen::VectorXd acceptance_rate(num_iterations);
     Eigen::VectorXd log_density(num_iterations);
     Eigen::VectorXd nfev(num_iterations);
+    Eigen::VectorXd accept_stat;
+    Eigen::VectorXd divergent;
+    Eigen::VectorXd n_leapfrog;
+    Eigen::VectorXd tree_depth;
+    Eigen::VectorXd energy;
+    Eigen::VectorXd stepsize;
+
+    if constexpr (requires {
+      algo.accept_stat();
+      algo.divergent();
+      algo.n_leapfrog();
+      algo.tree_depth();
+      algo.energy();
+      algo.stepsize();
+      algo.variance();
+    }) {
+      accept_stat.resize(num_iterations);
+      divergent.resize(num_iterations);
+      n_leapfrog.resize(num_iterations);
+      tree_depth.resize(num_iterations);
+      energy.resize(num_iterations);
+      stepsize.resize(num_iterations);
+    }
 
     Eigen::VectorXd draw(D);
 
@@ -185,6 +210,22 @@ int main(int argc, char** argv) {
       acceptance_rate(n) = algo.acceptance_rate_;
       log_density(n) = algo.log_density_;
       nfev(n) = algo.nfev_;
+      if constexpr (requires {
+        algo.accept_stat();
+        algo.divergent();
+        algo.n_leapfrog();
+        algo.tree_depth();
+        algo.energy();
+        algo.stepsize();
+        algo.variance();
+      }) {
+        accept_stat(n) = algo.accept_stat();
+        divergent(n) = algo.divergent();
+        n_leapfrog(n) = algo.n_leapfrog();
+        tree_depth(n) = algo.tree_depth();
+        energy(n) = algo.energy();
+        stepsize(n) = algo.stepsize();
+      }
       if (n >= num_warmup) {
         w.update(draw);
         msjd.update((draws.row(n) - draws.row(n-1)).norm());
@@ -208,6 +249,31 @@ int main(int argc, char** argv) {
     h5.createDataSet(std::format("{}/log_density", model_name), log_density);
     h5.createDataSet(std::format("{}/nfev", model_name), nfev);
 
+    if constexpr (requires {
+      algo.accept_stat();
+      algo.divergent();
+      algo.n_leapfrog();
+      algo.tree_depth();
+      algo.energy();
+      algo.stepsize();
+      algo.variance();
+    }) {
+      h5.createDataSet(
+        std::format("{}/accept_stat", model_name), accept_stat);
+      h5.createDataSet(
+        std::format("{}/divergent", model_name), divergent);
+      h5.createDataSet(
+        std::format("{}/n_leapfrog", model_name), n_leapfrog);
+      h5.createDataSet(
+        std::format("{}/tree_depth", model_name), tree_depth);
+      h5.createDataSet(
+        std::format("{}/energy", model_name), energy);
+      h5.createDataSet(
+        std::format("{}/stepsize", model_name), stepsize);
+      h5.createDataSet(
+        std::format("{}/variance", model_name), algo.variance());
+    }
+
     return 0;
   };
 
@@ -220,8 +286,7 @@ int main(int argc, char** argv) {
     klhr::SliceOptions slice_options{
       .seed = seed,
       .warmup = num_warmup,
-      .J = pca_basis,
-      .direction_noise_rank = direction_noise_rank,
+      .J = J,
       .direction_lowrank_weight = direction_lowrank_weight,
       .direction_min_diag_fraction = direction_min_diag_fraction,
       .lowrank_during_warmup = lowrank_during_warmup,
@@ -246,6 +311,16 @@ int main(int argc, char** argv) {
       .warmup = num_warmup,
     };
     klhr::MALA algo(model, data, mala_options);
+    return run_sampler(algo);
+  }
+
+  if (sampler == "stan") {
+    klhr::StanOptions stan_options{
+      .seed = seed,
+      .warmup = num_warmup,
+      .target_accept = target_accept,
+    };
+    klhr::Stan algo(model, data, stan_options);
     return run_sampler(algo);
   }
 

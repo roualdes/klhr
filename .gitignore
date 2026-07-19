@@ -228,3 +228,4 @@ draws/*.csv
 .Rhistory
 steps.org
 install/
+draws/

@@ -26,7 +26,6 @@ struct SliceOptions {
   std::size_t windowsize = 50;
   std::size_t windowscale = 2;
   Eigen::Index J = 1;
-  Eigen::Index direction_noise_rank = 1;
   double direction_lowrank_weight = 1.0;
   double direction_min_diag_fraction = 0.1;
   bool lowrank_during_warmup = true;
@@ -148,12 +147,6 @@ private:
     options.windowsize = std::max<std::size_t>(1, options.windowsize);
     options.windowscale = std::max<std::size_t>(1, options.windowscale);
     options.J = std::clamp(options.J, Eigen::Index{0}, dim);
-    if (options.direction_noise_rank < 0) {
-      options.direction_noise_rank = options.J;
-    } else {
-      options.direction_noise_rank = std::clamp(
-        options.direction_noise_rank, Eigen::Index{0}, options.J);
-    }
     options.direction_lowrank_weight =
       std::isfinite(options.direction_lowrank_weight) ?
       std::clamp(options.direction_lowrank_weight, 0.0, 1.0) : 1.0;
@@ -314,7 +307,7 @@ private:
     const double min_diag_fraction = opts_.direction_min_diag_fraction;
     const Eigen::VectorXd base_variance = diagonal_variance_();
     Eigen::VectorXd residual_variance = base_variance;
-    const Eigen::Index rank = direction_noise_rank_();
+    const Eigen::Index rank = lowrank_ready_ ? opts_.J : 0;
     if (rank == 0 || alpha == 0.0) {
       return diagonal_direction_noise_(base_variance);
     }
@@ -361,10 +354,6 @@ private:
     return diagonal_direction_noise_() + mean_direction_basis_.col(j);
   }
 
-  Eigen::Index direction_noise_rank_() const {
-    return lowrank_ready_ ? opts_.direction_noise_rank : 0;
-  }
-
   void initialize_pca_schedule_() {
     std::size_t final_start = 0;
     const auto& closures = windowed_adaptation_.closures();
@@ -378,8 +367,7 @@ private:
     const std::size_t final_length = final_start <= opts_.warmup ?
       opts_.warmup - final_start + 1 : 0;
     pca_calibration_enabled_ =
-      opts_.J > 0 && opts_.direction_noise_rank > 0 &&
-      opts_.pca_freeze_fraction > 0.0 && final_length > 2;
+      opts_.J > 0 && opts_.pca_freeze_fraction > 0.0 && final_length > 2;
     if (!pca_calibration_enabled_) {
       pca_freeze_draw_ = opts_.warmup;
       return;

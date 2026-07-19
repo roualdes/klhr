@@ -1,0 +1,17 @@
+[
+  {
+    "model_name": "earnings", "sampler": "stan",
+    "replications": 1, "seed": 0,
+    "iterations": 500000, "warmup": 250000, "target_accept": 0.95
+  },
+  {
+    "model_name": "earnings", "sampler": "normal",
+    "replications": 1, "seed": 0,
+    "iterations": 5000, "warmup": 2500
+  },
+  {
+    "model_name": "earnings", "sampler": "slice",
+    "replications": 1, "seed": 0,
+    "iterations": 5000, "warmup": 2500
+  }
+]

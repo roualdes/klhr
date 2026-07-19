@@ -1,2 +1,10 @@
 build/
 install/
+.git/
+.jj/
+.venv/
+__pycache__/
+.DS_Store
+draws/
+output/
+stan/*_model.so
