@@ -58,3 +58,13 @@ target_link_libraries(barker PRIVATE
                               CLI11::CLI11
 )
 target_compile_options(barker PRIVATE -Wall -Wextra)
+
+add_executable(slice slice.cpp)
+target_link_libraries(slice PRIVATE
+                            klhr
+                            mcmcpp
+                            dylib
+                            Eigen3::Eigen
+                            CLI11::CLI11
+)
+target_compile_options(slice PRIVATE -Wall -Wextra)

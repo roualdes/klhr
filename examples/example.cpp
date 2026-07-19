@@ -1,5 +1,8 @@
+#include "barker.hpp"
+#include "mala.hpp"
 #include "normal_klhr.hpp"
 #include "sas_klhr.hpp"
+#include "slice.hpp"
 
 #include <CLI/CLI.hpp>
 #include <Eigen/Dense>
@@ -41,7 +44,7 @@ int main(int argc, char** argv) {
   double transport_failure_direction_decay = 0.25;
 
   {
-    CLI::App app{"Run KLHR."};
+    CLI::App app{"Run an MCMC sampler."};
 
     app.add_option("--seed", seed,
                    "Random seed (default 0 => random)")
@@ -59,10 +62,11 @@ int main(int argc, char** argv) {
       ->check(CLI::NonNegativeNumber);
 
     app.add_option("--model", model_name,
-                   "Path to the Stan model library (.so from BridgeStan)");
+                   "Stan model name");
 
     app.add_option("--sampler", sampler,
-                   "Name of sampling algorithm to use");
+                   "Sampling algorithm: sas, normal, slice, barker, or mala")
+      ->check(CLI::IsMember({"sas", "normal", "slice", "barker", "mala"}));
 
     app.add_option("--pca-basis", pca_basis,
                    "Number of PCA basis vectors to learn")
@@ -140,7 +144,7 @@ int main(int argc, char** argv) {
 
   std::string model = std::format("./stan/{}_model.so", model_name);
   std::string data = std::format("./stan/{}.json", model_name);
-  klhr::KlhrOptions options = {
+  klhr::KlhrOptions klhr_options = {
     .seed = seed,
     .warmup = num_warmup,
     .J = pca_basis,
@@ -174,6 +178,7 @@ int main(int argc, char** argv) {
     Eigen::VectorXd draw(D);
 
     mcmcpp::WelfordAccumulator w{algo.dim()};
+    mcmcpp::WelfordAccumulator msjd{};
     for (std::size_t n = 0; n < num_iterations; ++n) {
       draw = algo.draw();
       draws.row(n) = draw;
@@ -182,12 +187,14 @@ int main(int argc, char** argv) {
       nfev(n) = algo.nfev_;
       if (n >= num_warmup) {
         w.update(draw);
+        msjd.update((draws.row(n) - draws.row(n-1)).norm());
       }
     }
 
     std::cout << "Seed: " << algo.seed() << '\n';
     std::cout << "mean: " << w.mean().transpose() << '\n';
     std::cout << "std: " << w.std().transpose() << '\n';
+    std::cout << "msjd: " << msjd.mean().transpose() << '\n';
     std::cout << "Number log_density evals: " << algo.nfev_ << '\n';
     std::cout << "Acceptance rate: " << algo.acceptance_rate_ << '\n';
 
@@ -205,10 +212,43 @@ int main(int argc, char** argv) {
   };
 
   if (sampler == "normal") {
-    klhr::NormalKLHR algo(model, data, options);
+    klhr::NormalKLHR algo(model, data, klhr_options);
     return run_sampler(algo);
   }
 
-  klhr::SASKLHR algo(model, data, options);
+  if (sampler == "slice") {
+    klhr::SliceOptions slice_options{
+      .seed = seed,
+      .warmup = num_warmup,
+      .J = pca_basis,
+      .direction_noise_rank = direction_noise_rank,
+      .direction_lowrank_weight = direction_lowrank_weight,
+      .direction_min_diag_fraction = direction_min_diag_fraction,
+      .lowrank_during_warmup = lowrank_during_warmup,
+      .pca_freeze_fraction = pca_freeze_fraction,
+    };
+    klhr::Slice algo(model, data, slice_options);
+    return run_sampler(algo);
+  }
+
+  if (sampler == "barker") {
+    klhr::BarkerOptions barker_options{
+      .seed = seed,
+      .warmup = num_warmup,
+    };
+    klhr::Barker algo(model, data, barker_options);
+    return run_sampler(algo);
+  }
+
+  if (sampler == "mala") {
+    klhr::MALAOptions mala_options{
+      .seed = seed,
+      .warmup = num_warmup,
+    };
+    klhr::MALA algo(model, data, mala_options);
+    return run_sampler(algo);
+  }
+
+  klhr::SASKLHR algo(model, data, klhr_options);
   return run_sampler(algo);
 }
