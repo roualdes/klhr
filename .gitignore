@@ -226,3 +226,5 @@ experiments/run_stan.py
 *.h5
 draws/*.csv
 .Rhistory
+steps.org
+install/
