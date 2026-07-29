@@ -39,6 +39,8 @@ RUN make \
         /app/klhr/stan/garch_model.so \
         /app/klhr/stan/arma_model.so \
         /app/klhr/stan/ar1_model.so \
+        /app/klhr/stan/hmm_model.so \
+        /app/klhr/stan/irt_model.so \
         /app/klhr/stan/earnings_model.so \
         /app/klhr/stan/funnel_model.so \
         /app/klhr/stan/corr-normal_model.so \
@@ -84,6 +86,8 @@ RUN test -x "/opt/klhr/bin/klhr-experiment"
 
 # runtime
 FROM debian:trixie-slim AS runtime
+
+LABEL org.opencontainers.image.source="https://github.com/roualdes/klhr"
 
 ENV DEBIAN_FRONTEND=noninteractive
 

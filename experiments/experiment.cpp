@@ -22,6 +22,8 @@
 #include <string>
 #include <system_error>
 
+// TODO store warmup in database
+
 using json = nlohmann::json;
 
 json parse_json(const std::filesystem::path& config_path, std::size_t index) {
