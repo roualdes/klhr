@@ -34,6 +34,7 @@ struct KlhrOptions {
   double grad_clip = positive_infinity;
   double sas_arg_clip = 30;
   double gtol = 1e-3;
+  double laplace_kl_residual_tol = 1e-3;
   std::size_t transport_maxiter_bfgs = 8;
   std::size_t K = 16;
   std::size_t warmup = 1'000;
@@ -227,20 +228,64 @@ protected:
       EvaluateKl evaluate_kl,
       TransformParameters transform_parameters) {
     const LineModeEstimate mode = fit_line_mode_(center, rho);
-    if (mode.success && mode.hessian_usable && !mode.hessian_identity) {
-      Eigen::VectorXd eta = Eigen::VectorXd::Zero(parameter_count);
-      eta(0) = mode.mode;
-      eta(1) = mode.log_scale;
-      return eta;
-    }
 
     Eigen::VectorXd init = Eigen::VectorXd::Zero(parameter_count);
     init(0) = mode.mode;
+
+    if (mode.success && mode.hessian_usable && !mode.hessian_identity) {
+      return transform_parameters(init, mode.log_scale);
+    }
 
     auto kl = [&](const Eigen::VectorXd& eta,
                   double& value, Eigen::VectorXd& grad) {
       evaluate_kl(eta, mode.log_scale, value, grad);
     };
+
+    if (mode.success && mode.hessian_usable && mode.hessian_identity) {
+      // BFGS can converge before replacing its initial identity Hessian.
+      // Validate that candidate with one KL evaluation before optimizing.
+      double initial_value = std::numeric_limits<double>::quiet_NaN();
+      Eigen::VectorXd initial_grad;
+      kl(init, initial_value, initial_grad);
+
+      const bool valid_initial =
+        std::isfinite(initial_value) &&
+        initial_value < numerics::bad_kl_value() &&
+        initial_grad.size() == parameter_count &&
+        initial_grad.allFinite();
+      if (valid_initial) {
+        Eigen::VectorXd residual = initial_grad;
+        // Express the location residual in proposal-standard-deviation units.
+        residual(0) *= scale_from_log_(mode.log_scale);
+        if (residual.lpNorm<Eigen::Infinity>() <=
+            opts_.laplace_kl_residual_tol) {
+          nfev_ += opts_.N;
+          return transform_parameters(init, mode.log_scale);
+        }
+      }
+
+      // Reuse the validation evaluation as BFGS's initial evaluation.
+      bool initial_evaluation_available = true;
+      auto cached_kl = [&](const Eigen::VectorXd& eta,
+                           double& value, Eigen::VectorXd& grad) {
+        const bool at_initial =
+          eta.size() == init.size() &&
+          (eta.array() == init.array()).all();
+        if (initial_evaluation_available && at_initial) {
+          initial_evaluation_available = false;
+          value = initial_value;
+          grad = initial_grad;
+          return;
+        }
+        kl(eta, value, grad);
+      };
+
+      bfgs::BfgsResult fit = bfgs::bfgs(cached_kl, init);
+      nfev_ += fit.nfev * opts_.N;
+      const Eigen::VectorXd raw =
+        fit.x.size() == parameter_count && fit.x.allFinite() ? fit.x : init;
+      return transform_parameters(raw, mode.log_scale);
+    }
 
     bfgs::BfgsResult fit = bfgs::bfgs(kl, init);
     nfev_ += fit.nfev * opts_.N;
@@ -267,6 +312,10 @@ protected:
     }
     if (!(options.gtol > 0.0) || !std::isfinite(options.gtol)) {
       options.gtol = 1e-3;
+    }
+    if (!(options.laplace_kl_residual_tol >= 0.0) ||
+        !std::isfinite(options.laplace_kl_residual_tol)) {
+      options.laplace_kl_residual_tol = 1e-3;
     }
     options.windowsize = std::max<std::size_t>(1, options.windowsize);
     options.windowscale = std::max<std::size_t>(1, options.windowscale);
