@@ -1,3 +1,5 @@
+#pragma once
+
 #include <Eigen/Dense>
 
 #include <cmath>
@@ -8,8 +10,8 @@ namespace klhr {
 
 namespace detail {
 
-Eigen::VectorXd normed_hermite_n(const Eigen::VectorXd& x,
-                                 const Eigen::Index n) {
+inline Eigen::VectorXd normed_hermite_n(const Eigen::VectorXd& x,
+                                        const Eigen::Index n) {
   const double pi = std::numbers::pi_v<double>;
   const double pi_mquarter = 1.0 / std::sqrt(std::sqrt(pi));
 
@@ -34,11 +36,14 @@ Eigen::VectorXd normed_hermite_n(const Eigen::VectorXd& x,
 
 }  // namespace detail
 
-void gauss_hermite(const Eigen::Index n, Eigen::VectorXd& ws,
-                   Eigen::VectorXd& xs) {
+inline void gauss_hermite(const Eigen::Index n, Eigen::VectorXd& ws,
+                          Eigen::VectorXd& xs) {
   if (n <= 0) {
     throw std::invalid_argument("gauss_hermite: N must be positive");
   }
+
+  ws.resize(n);
+  xs.resize(n);
 
   const double pi = std::numbers::pi_v<double>;
 

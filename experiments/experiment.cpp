@@ -277,6 +277,12 @@ int main(int argc, char** argv) {
       std::string nfev_tbl = std::format("{}/nfev/{}", sampler, r);
       model_tbl.createDataSet(nfev_tbl, nfev);
 
+      if constexpr (requires { algo.overrelaxation_K(); }) {
+        model_tbl.createDataSet(
+          std::format("{}/K/{}", sampler, r),
+          static_cast<std::uint64_t>(algo.overrelaxation_K()));
+      }
+
       if constexpr (requires {
         algo.accept_stat();
         algo.divergent();

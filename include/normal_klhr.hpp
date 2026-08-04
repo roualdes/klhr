@@ -28,15 +28,19 @@ protected:
       });
   }
 
-  double overrelaxed_proposal_(const Eigen::VectorXd& eta) override {
+  double overrelaxed_proposal_(const Eigen::VectorXd& eta,
+                               const double from) override {
     auto [mu, sigma] = unpack_(eta);
-    return overrelaxed_normal_proposal_(mu, sigma);
+    const double s = std::max(sigma, opts_.tol);
+    const double u = normal_cdf_((from - mu) / s);
+    const double up = overrelaxed_proposal_impl_(u);
+    return mu + s * normal_quantile(clamp_probability_(up));
   }
 
-  double transition_density_(const double from, const double to,
-                             const Eigen::VectorXd& eta) const override {
+  double log_line_density_(const double t,
+                           const Eigen::VectorXd& eta) const override {
     auto [mu, sigma] = unpack_(eta);
-    return normal_transition_density_(from, to, mu, sigma);
+    return log_q_(t, mu, std::max(sigma, opts_.tol));
   }
 
   void KL_(const Eigen::VectorXd& eta, const Eigen::VectorXd& center,
@@ -89,26 +93,6 @@ protected:
                        const double sigma) {
     const double z = (x - mu) / sigma;
     return -std::log(sigma) - 0.5 * z * z;
-  }
-
-  double normal_transition_density_(const double from, const double to,
-                                    const double mu,
-                                    const double sigma) const {
-    const double s = std::max(sigma, opts_.tol);
-    const double log_density = log_q_(to, mu, s);
-    if (opts_.K == 0) {
-      return log_density;
-    }
-    const double u_from = normal_cdf_((from - mu) / s);
-    const double u_to = normal_cdf_((to - mu) / s);
-    return overrelaxed_density_(u_from, u_to) + log_density;
-  }
-
-  double overrelaxed_normal_proposal_(const double mu, const double sigma) {
-    const double s = std::max(sigma, opts_.tol);
-    const double u = normal_cdf_((0.0 - mu) / s);
-    const double up = overrelaxed_proposal_impl_(u);
-    return mu + sigma * normal_quantile_(clamp_probability_(up));
   }
 
   std::pair<double, double> unpack_(const Eigen::VectorXd& eta) const {

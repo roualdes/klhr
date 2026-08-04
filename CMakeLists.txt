@@ -8,12 +8,14 @@ project(klhr
 
 option(KLHR_BUILD_EXAMPLES "Build the examples target for the library" ON)
 
+include(CTest)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-Wall -Wextra)
 endif()
 
@@ -89,3 +91,7 @@ target_include_directories(klhr INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>  # for builds
   $<INSTALL_INTERFACE:include>
 )
+
+if (BUILD_TESTING)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/tests")
+endif()

@@ -43,6 +43,13 @@ int main(int argc, char** argv) {
     klhr::KlhrOptions{}.transport_max_endpoint_from_best_drop;
   double transport_direction_persistence = 0.9;
   double transport_failure_direction_decay = 0.25;
+  std::size_t transport_reflection_budget_per_step =
+    klhr::KlhrOptions{}.transport_reflection_budget_per_step;
+  double laplace_kl_residual_tol =
+    klhr::KlhrOptions{}.laplace_kl_residual_tol;
+  std::size_t K = klhr::KlhrOptions{}.K;
+  bool adapt_K = klhr::KlhrOptions{}.adapt_K;
+  std::size_t K_max = klhr::KlhrOptions{}.K_max;
 
   {
     CLI::App app{"Run an MCMC sampler."};
@@ -142,6 +149,31 @@ int main(int argc, char** argv) {
                    "Direction flip/damping factor after failed initial transport")
       ->default_val(transport_failure_direction_decay);
 
+    app.add_option("--transport-reflection-budget-per-step",
+                   transport_reflection_budget_per_step,
+                   "Phase-wide reflection budget per transport step (0 = unlimited)")
+      ->default_val(transport_reflection_budget_per_step)
+      ->check(CLI::NonNegativeNumber);
+
+    app.add_option("--laplace-kl-residual-tol", laplace_kl_residual_tol,
+                   "Accept the Laplace line fit when its KL gradient residual is below this")
+      ->default_val(laplace_kl_residual_tol)
+      ->check(CLI::NonNegativeNumber);
+
+    app.add_option("--K", K,
+                   "Ordered overrelaxation level (rounded down to odd)")
+      ->default_val(K)
+      ->check(CLI::NonNegativeNumber);
+
+    app.add_flag("--adapt-K,!--no-adapt-K", adapt_K,
+                 "Adapt K during post-transport warmup")
+      ->default_val(adapt_K);
+
+    app.add_option("--K-max", K_max,
+                   "Largest K the adaptation ladder may reach")
+      ->default_val(K_max)
+      ->check(CLI::NonNegativeNumber);
+
     CLI11_PARSE(app, argc, argv);
   }
 
@@ -149,6 +181,10 @@ int main(int argc, char** argv) {
   std::string data = std::format("./stan/{}.json", model_name);
   klhr::KlhrOptions klhr_options = {
     .seed = seed,
+    .laplace_kl_residual_tol = laplace_kl_residual_tol,
+    .K = K,
+    .adapt_K = adapt_K,
+    .K_max = K_max,
     .warmup = num_warmup,
     .J = J,
     .direction_lowrank_weight = direction_lowrank_weight,
@@ -166,6 +202,8 @@ int main(int argc, char** argv) {
       transport_max_endpoint_from_best_drop,
     .transport_direction_persistence = transport_direction_persistence,
     .transport_failure_direction_decay = transport_failure_direction_decay,
+    .transport_reflection_budget_per_step =
+      transport_reflection_budget_per_step,
   };
 
 
@@ -238,6 +276,10 @@ int main(int argc, char** argv) {
     std::cout << "msjd: " << msjd.mean().transpose() << '\n';
     std::cout << "Number log_density evals: " << algo.nfev_ << '\n';
     std::cout << "Acceptance rate: " << algo.acceptance_rate_ << '\n';
+    if constexpr (requires { algo.overrelaxation_K(); }) {
+      std::cout << "Overrelaxation K: "
+                << algo.overrelaxation_K() << '\n';
+    }
 
     HighFive::File h5("draws/experiments.h5", HighFive::File::Truncate);
 
@@ -248,6 +290,11 @@ int main(int argc, char** argv) {
     h5.createDataSet(std::format("{}/acceptance_rate", model_name), acceptance_rate);
     h5.createDataSet(std::format("{}/log_density", model_name), log_density);
     h5.createDataSet(std::format("{}/nfev", model_name), nfev);
+    if constexpr (requires { algo.overrelaxation_K(); }) {
+      h5.createDataSet(std::format("{}/K", model_name),
+                       static_cast<std::uint64_t>(
+                         algo.overrelaxation_K()));
+    }
 
     if constexpr (requires {
       algo.accept_stat();

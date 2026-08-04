@@ -29,15 +29,19 @@ protected:
       });
   }
 
-  double overrelaxed_proposal_(const Eigen::VectorXd& eta) override {
+  double overrelaxed_proposal_(const Eigen::VectorXd& eta,
+                               const double from) override {
     auto [m, s, e] = unpack_sas_(eta);
-    return overrelaxed_sas_proposal_(m, s, e);
+    const double ss = std::max(s, opts_.tol);
+    const double u = normal_cdf_(Tinv_(from, m, ss, e));
+    const double up = overrelaxed_proposal_impl_(u);
+    return T_(normal_quantile(clamp_probability_(up)), m, ss, e);
   }
 
-  double transition_density_(const double from, const double to,
-                             const Eigen::VectorXd& eta) const override {
+  double log_line_density_(const double t,
+                           const Eigen::VectorXd& eta) const override {
     auto [m, s, e] = unpack_sas_(eta);
-    return sas_transition_density_(from, to, m, s, e);
+    return sas_log_q_(t, m, std::max(s, opts_.tol), e);
   }
 
   void KL_(const Eigen::VectorXd& eta,
@@ -106,26 +110,6 @@ protected:
       - 0.5 * std::log1p(z * z);
   }
 
-  double sas_transition_density_(const double from, const double to,
-                                 const double m, const double s,
-                                 const double e) const {
-    const double ss = std::max(s, opts_.tol);
-    const double log_density = sas_log_q_(to, m, ss, e);
-    if (opts_.K == 0) {
-      return log_density;
-    }
-    const double u_from = normal_cdf_(Tinv_(from, m, ss, e));
-    const double u_to = normal_cdf_(Tinv_(to, m, ss, e));
-    return overrelaxed_density_(u_from, u_to) + log_density;
-  }
-
-  double overrelaxed_sas_proposal_(const double m, const double s, const double e) {
-    const double ss = std::max(s, opts_.tol);
-    const double u = normal_cdf_(Tinv_(0.0, m, ss, e));
-    const double up = overrelaxed_proposal_impl_(u);
-    return T_(normal_quantile_(clamp_probability_(up)), m, ss, e);
-  }
-
   double T_(const double normal_draw, const double m, const double s,
             const double e) const {
     const double z = sinh_clipped_(std::asinh(normal_draw) + e);
@@ -172,21 +156,12 @@ protected:
     return log_cosh_(sas_arg_clipped_(x));
   }
 
-  double bounded_skew_(const double raw) const {
-    const double r = skew_radius_();
-    if (!std::isfinite(raw)) {
-      return 0.0;
-    }
-    return r * std::tanh(raw / r);
+  static double bounded_skew_(const double raw) {
+    return numerics::bounded_reparam(raw, skew_radius_());
   }
 
-  double bounded_skew_derivative_(const double raw) const {
-    const double r = skew_radius_();
-    if (!std::isfinite(raw)) {
-      return 0.0;
-    }
-    const double th = std::tanh(raw / r);
-    return 1.0 - th * th;
+  static double bounded_skew_derivative_(const double raw) {
+    return numerics::bounded_reparam_derivative(raw, skew_radius_());
   }
 
   static constexpr double skew_radius_() {

@@ -3,6 +3,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace klhr {
@@ -58,11 +59,17 @@ public:
     return nv; // (n / (n + 5.0)) * nv.array() + 1e-3 * (5.0 / (n + 5.0));
   }
 
+  // Unpopulated components have zero norm; leave those columns at zero
+  // rather than dividing through and handing out NaN.
   Eigen::MatrixXd vectors() const {
     Eigen::MatrixXd out = v_;
     const Eigen::VectorXd vals = values();
     for (Eigen::Index i = 0; i < K_; ++i) {
-      out.col(i) /= vals(i);
+      if (std::isfinite(vals(i)) && vals(i) > tol_) {
+        out.col(i) /= vals(i);
+      } else {
+        out.col(i).setZero();
+      }
     }
     return out;
   }

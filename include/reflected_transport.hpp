@@ -39,6 +39,8 @@ struct ReflectedTransportOptions {
   double max_endpoint_from_best_drop = 100.0;
   double direction_persistence = 0.9;
   double failure_direction_decay = 0.25;
+  // Total reflections allowed across the phase. Zero means unlimited.
+  std::size_t reflection_budget = 0;
 };
 
 class ReflectedTransport {
@@ -58,6 +60,7 @@ public:
 
   struct Handoff {
     State state;
+    Eigen::VectorXd mean;
     Eigen::VectorXd covariance;
     Eigen::MatrixXd pca_basis;
     Eigen::VectorXd pca_weights;
@@ -116,6 +119,7 @@ public:
     handoff_whitened_ = false;
     rollback_ = false;
     distance_ = opts_.initial_distance;
+    reflections_used_ = 0;
     direction_ = normal_rng_(dim_, rng, standard_normal);
     regularize_direction_(rng, standard_normal);
     initialized_ = valid_initial;
@@ -148,8 +152,20 @@ public:
     bool moved = false;
     bool failed = false;
 
-    for (std::size_t reflection = 0;
-         reflection < opts_.max_reflections; ++reflection) {
+    // Specular reflection off the level sets of an eccentric whitened
+    // target is a billiard in an ellipsoid: the orbit can advance
+    // indefinitely without the displacement ever turning back on the
+    // direction, so the U-turn test alone never fires and only the
+    // per-step cap stops the sequence. The phase-wide budget bounds that
+    // without shortening any individual excursion, which matters because
+    // the excursions that carry a badly initialised chain to the bulk are
+    // rare and long. Breaking early on a within-sequence log density stall
+    // was also tried and measurably broke that transport: the climb happens
+    // across steps, not monotonically within one reflection sequence.
+    const std::size_t step_limit = remaining_reflection_budget_();
+
+    for (std::size_t reflection = 0; reflection < step_limit; ++reflection) {
+      ++reflections_used_;
       const Eigen::VectorXd rho =
         (scale.array() * direction.array()).matrix();
       const Eigen::VectorXd eta = fit_ray_(model, current.theta, rho,
@@ -183,8 +199,16 @@ public:
         failed = true;
         break;
       }
-      const double turning = delta.dot(direction);
-      const double initial_turning = delta.dot(direction0);
+      // Directions live in the whitened metric, so the displacement has to
+      // be expressed there too before projecting onto them.
+      const Eigen::VectorXd whitened_delta =
+        (delta.array() / scale.array()).matrix();
+      if (!whitened_delta.allFinite()) {
+        failed = true;
+        break;
+      }
+      const double turning = whitened_delta.dot(direction);
+      const double initial_turning = whitened_delta.dot(direction0);
       if (!std::isfinite(turning) || !std::isfinite(initial_turning) ||
           turning <= 0.0 || initial_turning <= 0.0) {
         break;
@@ -222,12 +246,14 @@ public:
       best_state_.log_density - state_.log_density;
     if (std::isfinite(endpoint_from_best_drop) &&
         endpoint_from_best_drop > opts_.max_endpoint_from_best_drop) {
-      rollback_to_initial_(rng, standard_normal);
+      rollback_to_best_(rng, standard_normal);
       return handoff_();
     }
 
     handoff_ready_ = set_mean_direction_from_pca_();
-    handoff_whitened_ = handoff_ready_;
+    // The PCA is built on raw centred draws, not whitened ones, so the
+    // consumer must not rescale the basis by the metric.
+    handoff_whitened_ = false;
     if (handoff_ready_) {
       handoff_basis_ = mean_direction_basis_;
       handoff_weights_ = mean_direction_weights_;
@@ -240,6 +266,19 @@ public:
   }
 
 private:
+  std::size_t remaining_reflection_budget_() const {
+    if (opts_.reflection_budget == 0) {
+      return opts_.max_reflections;
+    }
+    const std::size_t remaining =
+      opts_.reflection_budget > reflections_used_ ?
+      opts_.reflection_budget - reflections_used_ : 0;
+    // Always allow one reflection so an exhausted budget degrades to a
+    // plain ray step rather than freezing the phase.
+    return std::max<std::size_t>(1,
+                                 std::min(opts_.max_reflections, remaining));
+  }
+
   static Eigen::Index checked_dimension_(const Eigen::Index dim) {
     if (dim < 0) {
       throw std::invalid_argument(
@@ -307,6 +346,7 @@ private:
     options.failure_direction_decay =
       std::isfinite(options.failure_direction_decay) ?
       std::clamp(options.failure_direction_decay, 0.0, 1.0) : 0.25;
+    options.max_reflections = std::max<std::size_t>(1, options.max_reflections);
     return options;
   }
 
@@ -629,13 +669,18 @@ private:
     }
   }
 
-  void rollback_to_initial_(
+  // Fall back to the best point the phase actually found; reverting all the
+  // way to the initial state throws away whatever progress was made.
+  void rollback_to_best_(
       mcmcpp::rng& rng,
       std::normal_distribution<double>& standard_normal) {
-    if (initial_state_.theta.allFinite() &&
-        initial_state_.grad.allFinite() &&
-        std::isfinite(initial_state_.log_density)) {
-      state_ = initial_state_;
+    const State& fallback =
+      (best_state_.theta.allFinite() && best_state_.grad.allFinite() &&
+       std::isfinite(best_state_.log_density)) ?
+      best_state_ : initial_state_;
+    if (fallback.theta.allFinite() && fallback.grad.allFinite() &&
+        std::isfinite(fallback.log_density)) {
+      state_ = fallback;
     }
     rollback_ = true;
     covariance_.setOnes();
@@ -660,6 +705,7 @@ private:
   Handoff handoff_() const {
     return {
       .state = state_,
+      .mean = smooth_mean_,
       .covariance = covariance_,
       .pca_basis = handoff_basis_,
       .pca_weights = handoff_weights_,
@@ -740,6 +786,7 @@ private:
   Eigen::MatrixXd handoff_basis_;
   Eigen::VectorXd handoff_weights_;
   double distance_;
+  std::size_t reflections_used_ = 0;
   bool initialized_ = false;
   bool mean_direction_ready_ = false;
   bool handoff_ready_ = false;

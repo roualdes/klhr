@@ -2,7 +2,11 @@
 
 #include <cmath>
 
-static double normal_quantile_(double p) {
+namespace klhr {
+
+// Acklam's rational approximation to the standard normal quantile, good to
+// about 1.15e-9 relative.
+inline double normal_quantile_approx(const double p) {
   constexpr double a1 = -3.969683028665376e+01;
   constexpr double a2 =  2.209460984245205e+02;
   constexpr double a3 = -2.759285104469687e+02;
@@ -48,3 +52,27 @@ static double normal_quantile_(double p) {
   return (((((a1 * r + a2) * r + a3) * r + a4) * r + a5) * r + a6) * q
     / (((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + 1.0);
 }
+
+inline double normal_cdf(const double z) {
+  return 0.5 * std::erfc(-z / std::sqrt(2.0));
+}
+
+// One Halley step against the exact CDF. The overrelaxation kernel is only
+// reversible with respect to the fitted density when F and its inverse are
+// genuine inverses, so the raw rational approximation is polished here.
+inline double normal_quantile(const double p) {
+  const double z = normal_quantile_approx(p);
+  if (!std::isfinite(z)) {
+    return z;
+  }
+  constexpr double sqrt_two_pi = 2.5066282746310002;
+  const double error = normal_cdf(z) - p;
+  const double slope = error * sqrt_two_pi * std::exp(0.5 * z * z);
+  if (!std::isfinite(slope)) {
+    return z;
+  }
+  const double refined = z - slope / (1.0 + 0.5 * z * slope);
+  return std::isfinite(refined) ? refined : z;
+}
+
+} // namespace klhr
