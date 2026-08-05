@@ -46,12 +46,17 @@ struct KlhrOptions {
   std::size_t maxiter_bfgs = 32;
   std::size_t transport_maxiter_bfgs = 8;
   // Odd K only: an even K puts a self-transition atom at the middle rank,
-  // which wastes a draw and is not part of the continuous kernel.
+  // which wastes a draw and is not part of the continuous kernel. Fixed-K
+  // sweeps put the optimum near 127 (earnings) and 255 (funnel) with cost
+  // flat in K, so the ceiling is high; the starting level stays conservative
+  // because a large K is least safe early, before the line fit settles.
   std::size_t K = 15;
   bool adapt_K = true;
-  std::size_t K_max = 63;
+  std::size_t K_max = 511;
   std::size_t K_windowsize = 50;
   std::size_t K_windowscale = 2;
+  std::size_t K_refresh_lags = 4;
+  bool K_interleave_trials = true;
   std::size_t warmup = 1'000;
   std::size_t windowsize = 50;
   std::size_t windowscale = 2;
@@ -60,6 +65,10 @@ struct KlhrOptions {
   double direction_min_diag_fraction = 0.1;
   bool lowrank_during_warmup = true;
   double pca_freeze_fraction = 0.1;
+  // Window closures required before the low-rank direction is used. One
+  // engages it as soon as a basis and its projected variances are both
+  // current; two waits for a second, longer window to re-estimate them.
+  std::size_t lowrank_min_activations = 1;
   double transport_cov_shrink = 0.25;
   double transport_cov_ratio_cap = 4.0;
   double l = 0.0;
@@ -92,8 +101,14 @@ public:
     std_uniform_(0.0, 1.0),
     std_normal_(0.0, 1.0),
     opts_(normalized_options_(options, bsm_.dim())),
+    adaptation_steps_(post_transport_warmup_steps(
+      opts_.warmup, opts_.initial_transport_steps)),
     transport_(bsm_.dim(), transport_options_(opts_)),
-    windowed_adaptation_(opts_.warmup, opts_.windowsize, opts_.windowscale),
+    // Windows are laid out over the post-transport span, matching the K
+    // schedule. Running them over the whole warmup meant the transport phase
+    // silently consumed the first closures without adapting anything.
+    windowed_adaptation_(adaptation_steps_, opts_.windowsize,
+                         opts_.windowscale),
     K_adaptation_(K_adaptation_config_(opts_, bsm_.dim())),
     online_moments_(bsm_.dim()),
     K_online_moments_(bsm_.dim()),
@@ -161,9 +176,6 @@ public:
       log_density_ = result.state.log_density;
       // const double acceptance_delta = result.moved - acceptance_rate_;
       // acceptance_rate_ += acceptance_delta / draw_;
-      if (draw_ <= opts_.warmup) {
-        (void) windowed_adaptation_.window_closed(draw_);
-      }
       if (draw_ == opts_.initial_transport_steps) {
         apply_transport_handoff_(transport_.finish(rng_, std_normal_));
       }
@@ -181,16 +193,22 @@ public:
     if (K_draw > 0 && K_adaptation_.enabled()) {
       adapt_K_warmup_(rho, diagnostics);
     }
-    adapt_warmup_(theta_, draw_);
+    adapt_warmup_(theta_, post_transport_warmup_draw(
+      draw_, opts_.warmup, opts_.initial_transport_steps));
     return bsm_.param_constrain(theta_);
   }
 
   Eigen::VectorXd random_direction() {
     const Eigen::Index D = dim();
-    const bool use_sampling_direction =
+    // One direction model throughout: a Gaussian shaped like the current
+    // covariance estimate, degrading to its diagonal when no low-rank basis
+    // is available yet. The old fallback added a unit basis vector as a mean
+    // offset, which is O(1) against O(sqrt(D)) of noise and so washed out in
+    // any real dimension.
+    const bool use_lowrank =
       (opts_.lowrank_during_warmup || draw_ > opts_.warmup) && lowrank_ready_;
-    Eigen::VectorXd rho = use_sampling_direction ?
-      direction_noise_() : mean_direction_noise_();
+    Eigen::VectorXd rho = use_lowrank ?
+      direction_noise_() : diagonal_direction_noise_();
 
     double norm = rho.norm();
     if (!std::isfinite(norm) || norm <= opts_.tol) {
@@ -379,6 +397,8 @@ protected:
       options.laplace_kl_residual_tol = 1e-3;
     }
     options.maxiter_bfgs = std::max<std::size_t>(1, options.maxiter_bfgs);
+    options.lowrank_min_activations =
+      std::max<std::size_t>(1, options.lowrank_min_activations);
     const auto int_max =
       static_cast<std::size_t>(std::numeric_limits<int>::max());
     options.K = force_odd_K_(std::min(options.K, int_max));
@@ -431,6 +451,8 @@ protected:
         options.warmup, options.initial_transport_steps),
       .windowsize = options.K_windowsize,
       .windowscale = options.K_windowscale,
+      .refresh_lags = options.K_refresh_lags,
+      .interleave_trials = options.K_interleave_trials,
       .dimension = static_cast<std::size_t>(std::max<Eigen::Index>(1, dim)),
       .tolerance = options.tol,
     };
@@ -472,6 +494,8 @@ protected:
   std::normal_distribution<double> std_normal_;
 
   KlhrOptions opts_;
+  // Warmup draws that actually reach the adaptation, i.e. after transport.
+  std::size_t adaptation_steps_;
   ReflectedTransport transport_;
   mcmcpp::WindowedAdaptation windowed_adaptation_;
   KWindowedAdaptation K_adaptation_;
@@ -490,11 +514,7 @@ protected:
   Eigen::MatrixXd eigvecs_;
   Eigen::VectorXd eigvals_;
   Eigen::MatrixXd projection_basis_;
-  Eigen::MatrixXd mean_direction_basis_;
-  Eigen::VectorXd mean_direction_weights_;
   bool projection_basis_ready_ = false;
-  bool mean_direction_ready_ = false;
-  bool mean_direction_whitened_ = false;
   bool pca_frozen_ = false;
   bool lowrank_ready_ = false;
   bool pca_calibration_enabled_ = false;
@@ -699,8 +719,6 @@ protected:
     eigvecs_ = Eigen::MatrixXd::Zero(D, opts_.J);
     eigvals_ = Eigen::VectorXd::Ones(opts_.J);
     projection_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
-    mean_direction_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
-    mean_direction_weights_ = Eigen::VectorXd::Ones(opts_.J);
 
     online_moments_.reset();
     online_pca_.reset();
@@ -710,8 +728,6 @@ protected:
     }
 
     projection_basis_ready_ = false;
-    mean_direction_ready_ = false;
-    mean_direction_whitened_ = false;
     pca_frozen_ = false;
     lowrank_ready_ = false;
     projected_pair_count_ = 0;
@@ -777,46 +793,23 @@ protected:
       normal_rng_(dim()));
   }
 
-  Eigen::VectorXd mean_direction_noise_() {
-    const Eigen::Index D = dim();
-    if (!mean_direction_ready_) {
-      return diagonal_direction_noise_();
-    }
-
-    std::discrete_distribution<Eigen::Index> component(
-      mean_direction_weights_.data(),
-      mean_direction_weights_.data() + mean_direction_weights_.size());
-    const Eigen::Index j = component(rng_);
-
-    Eigen::VectorXd noise;
-    if (mean_direction_whitened_) {
-      noise = normal_rng_(D);
-      noise += mean_direction_basis_.col(j);
-      noise = metric_scale_().array() * noise.array();
-    } else {
-      noise = diagonal_direction_noise_();
-      noise += mean_direction_basis_.col(j);
-    }
-    return noise;
-  }
-
   void initialize_pca_schedule_() {
     std::size_t final_start = 0;
     const auto& closures = windowed_adaptation_.closures();
-    if (opts_.warmup > 0) {
+    if (adaptation_steps_ > 0) {
       final_start = 1;
-      if (closures.size() >= 2 && closures.back() == opts_.warmup) {
+      if (closures.size() >= 2 && closures.back() == adaptation_steps_) {
         final_start = closures[closures.size() - 2] + 1;
       }
     }
 
-    const std::size_t final_length = final_start <= opts_.warmup ?
-      opts_.warmup - final_start + 1 : 0;
+    const std::size_t final_length = final_start <= adaptation_steps_ ?
+      adaptation_steps_ - final_start + 1 : 0;
     // Zero-valued PCA options intentionally disable low-rank calibration.
     pca_calibration_enabled_ =
       opts_.J > 0 && opts_.pca_freeze_fraction > 0.0 && final_length > 2;
     if (!pca_calibration_enabled_) {
-      pca_freeze_draw_ = opts_.warmup;
+      pca_freeze_draw_ = adaptation_steps_;
       return;
     }
 
@@ -825,68 +818,36 @@ protected:
     const std::size_t tail_length =
       std::clamp<std::size_t>(tail, 1, final_length);
     pca_freeze_draw_ =
-      std::max(final_start, opts_.warmup - tail_length);
+      std::max(final_start, adaptation_steps_ - tail_length);
   }
 
   bool set_projection_basis_from_online_pca_() {
     if (online_pca_.count() < opts_.J) {
       return false;
     }
+    return set_projection_basis_(online_pca_.vectors());
+  }
 
-    Eigen::MatrixXd basis = online_pca_.vectors();
-    if (!basis.allFinite()) {
+  // Normalise and install a low-rank direction basis. The variances that go
+  // with it are estimated separately, from the projected moments of actual
+  // post-transport draws, so only the directions are taken on trust here.
+  bool set_projection_basis_(Eigen::MatrixXd basis) {
+    if (opts_.J <= 0 || basis.cols() < opts_.J || !basis.allFinite()) {
+      projection_basis_ready_ = false;
       return false;
     }
-
-    projection_basis_ = basis.leftCols(opts_.J);
-    for (Eigen::Index j = 0; j < projection_basis_.cols(); ++j) {
-      const double norm = projection_basis_.col(j).norm();
+    basis = basis.leftCols(opts_.J).eval();
+    for (Eigen::Index j = 0; j < basis.cols(); ++j) {
+      const double norm = basis.col(j).norm();
       if (!std::isfinite(norm) || norm <= opts_.tol) {
         projection_basis_ready_ = false;
         return false;
       }
-      projection_basis_.col(j) /= norm;
-    }
-    projection_basis_ready_ = true;
-    return true;
-  }
-
-  bool set_mean_direction_(Eigen::MatrixXd basis,
-                           Eigen::VectorXd weights,
-                           const bool whitened) {
-    mean_direction_ready_ = false;
-    mean_direction_whitened_ = false;
-    if (!basis.allFinite() || !weights.allFinite()) {
-      mean_direction_basis_.setZero();
-      mean_direction_weights_.setOnes();
-      return false;
-    }
-
-    for (Eigen::Index j = 0; j < basis.cols(); ++j) {
-      const double norm = basis.col(j).norm();
-      if (!std::isfinite(norm) || norm <= opts_.tol) {
-        mean_direction_basis_.setZero();
-        mean_direction_weights_.setOnes();
-        return false;
-      }
       basis.col(j) /= norm;
     }
-
-    mean_direction_basis_ = std::move(basis);
-    mean_direction_weights_ = weights.cwiseMax(opts_.tol);
-    mean_direction_ready_ = true;
-    mean_direction_whitened_ = whitened;
+    projection_basis_ = std::move(basis);
+    projection_basis_ready_ = true;
     return true;
-  }
-
-  void set_mean_direction_from_online_pca_(const bool whitened = false) {
-    if (online_pca_.count() < opts_.J) {
-      return;
-    }
-
-    Eigen::MatrixXd basis = online_pca_.vectors().leftCols(opts_.J);
-    Eigen::VectorXd weights = online_pca_.values().head(opts_.J);
-    (void) set_mean_direction_(std::move(basis), std::move(weights), whitened);
   }
 
   void update_projected_moments_(const Eigen::VectorXd& theta) {
@@ -915,7 +876,7 @@ protected:
     eigvecs_.leftCols(opts_.J) = projection_basis_;
     eigvals_.head(opts_.J) = variances;
     ++projected_pair_count_;
-    lowrank_ready_ = projected_pair_count_ >= 2;
+    lowrank_ready_ = projected_pair_count_ >= opts_.lowrank_min_activations;
   }
 
   void freeze_pca_for_final_calibration_() {
@@ -929,7 +890,6 @@ protected:
     activate_projected_pair_();
 
     const bool frozen = set_projection_basis_from_online_pca_();
-    set_mean_direction_from_online_pca_();
     if (!frozen && projected_pair_count_ > 0) {
       projection_basis_ = eigvecs_.leftCols(opts_.J);
       projection_basis_ready_ = projection_basis_.allFinite();
@@ -969,21 +929,22 @@ protected:
       cov_ = handoff.covariance;
     }
     seed_mean_from_handoff_(handoff);
-    if (!handoff.pca_ready ||
-        !set_mean_direction_(handoff.pca_basis, handoff.pca_weights,
-                             handoff.pca_whitened)) {
-      mean_direction_basis_.setZero();
-      mean_direction_weights_.setOnes();
-      mean_direction_ready_ = false;
-      mean_direction_whitened_ = false;
+    // The transport's principal directions seed the low-rank basis, so the
+    // projected moments start accumulating against it from the first
+    // post-transport draw. Its weights are not reused: the scale comes from
+    // the projected variances of real draws at the first window close.
+    if (!handoff.pca_ready || !set_projection_basis_(handoff.pca_basis)) {
+      projection_basis_ready_ = false;
     }
     online_pca_.reset();
     initialize_K_window_metric_(false);
   }
 
+  // adaptation_draw counts from the end of the transport phase and is zero
+  // outside post-transport warmup.
   void adapt_warmup_(const Eigen::VectorXd& theta,
                      const std::size_t adaptation_draw) {
-    if (adaptation_draw > opts_.warmup) {
+    if (adaptation_draw == 0) {
       return;
     }
 
@@ -1008,7 +969,6 @@ protected:
       if (pca_calibration_enabled_ && !pca_frozen_) {
         activate_projected_pair_();
         const bool has_next_basis = set_projection_basis_from_online_pca_();
-        set_mean_direction_from_online_pca_();
         projected_moments_.reset();
         if (!has_next_basis) {
           projection_basis_ready_ = false;
@@ -1018,7 +978,7 @@ protected:
     }
 
     if (pca_calibration_enabled_ && pca_frozen_ &&
-        adaptation_draw == opts_.warmup) {
+        adaptation_draw == adaptation_steps_) {
       activate_projected_pair_();
     }
   }

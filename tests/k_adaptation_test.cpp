@@ -1,5 +1,7 @@
 #include "k_adaptation.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <iostream>
 #include <limits>
@@ -21,18 +23,42 @@ void check(const bool condition, const std::string_view expression,
 
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
+// Period 13, deliberately longer than the deepest lag the refresh guard
+// inspects. A short repeating pattern would make every multiple of its
+// period look like a perfect cycle, which is the pathology the guard exists
+// to reject -- a "healthy" fixture must not trip it.
 klhr::KAdaptationObservation healthy_observation(
     const std::size_t index,
     const double squared_jump,
     const bool radius_available = false) {
-  static constexpr double values[] = {0.0, 1.0, 0.0, -1.0};
+  static constexpr double values[] = {
+    0.0, 1.0, -0.5, 0.25, -1.0, 0.75, 0.5,
+    -0.25, 1.25, -0.75, 0.1, -1.25, 0.6};
+  const double value = values[index % 13];
   return {
     .acceptance_probability = 1.0,
     .standardized_squared_jump = squared_jump,
     .valid = true,
-    .log_density = values[index % 4],
+    .log_density = value,
     .radius_available = radius_available,
-    .radius = values[index % 4],
+    .radius = value,
+  };
+}
+
+// A clean cycle of the given period, for the periodicity tests.
+klhr::KAdaptationObservation cyclic_observation(
+    const std::size_t index,
+    const std::size_t period,
+    const double squared_jump) {
+  const double value =
+    static_cast<double>(index % period) - 0.5 * static_cast<double>(period - 1);
+  return {
+    .acceptance_probability = 1.0,
+    .standardized_squared_jump = squared_jump,
+    .valid = true,
+    .log_density = value,
+    .radius_available = true,
+    .radius = value,
   };
 }
 
@@ -230,7 +256,11 @@ void test_lag_two_periodicity_moves_down() {
   CHECK(adaptation.K() == 7);
 }
 
-void test_near_tie_prefers_lower_adjacent_level() {
+// Selection used to apply a near-optimal band that broke ties toward the
+// smaller K, so a larger level that was better by less than the band width
+// could never win. Cost is flat in K now, so selection is a plain argmax and
+// a small gain at the larger level is taken.
+void test_small_gain_at_larger_K_is_taken() {
   klhr::KAdaptationConfig config{
     .initial_K = 7,
     .maximum_K = 15,
@@ -248,11 +278,139 @@ void test_near_tie_prefers_lower_adjacent_level() {
   std::vector<std::size_t> attempts(16, 0);
   for (std::size_t draw = 0; draw < 16; ++draw) {
     const std::size_t K = adaptation.K();
+    // Monotone in K but all within the old 5% band of the best.
+    const double score = K == 3 ? 10.0 : (K == 7 ? 10.2 : 10.4);
     adaptation.observe(healthy_observation(
-      attempts[K]++, 10.0, true));
+      attempts[K]++, score, true));
+  }
+  CHECK(adaptation.finalized());
+  CHECK(adaptation.K() == 15);
+}
+
+// A larger level that is genuinely worse must still lose.
+void test_worse_larger_level_is_rejected() {
+  klhr::KAdaptationConfig config{
+    .initial_K = 7,
+    .maximum_K = 15,
+    .warmup_steps = 32,
+    .windowsize = 16,
+    .windowscale = 1,
+    .dimension = 1,
+    .minimum_window = 4,
+  };
+  klhr::KWindowedAdaptation adaptation(config);
+  for (std::size_t draw = 0; draw < 16; ++draw) {
+    adaptation.observe(healthy_observation(draw, 1.0));
+  }
+
+  std::vector<std::size_t> attempts(16, 0);
+  for (std::size_t draw = 0; draw < 16; ++draw) {
+    const std::size_t K = adaptation.K();
+    const double score = K == 3 ? 50.0 : (K == 7 ? 10.0 : 1.0);
+    adaptation.observe(healthy_observation(
+      attempts[K]++, score, true));
   }
   CHECK(adaptation.finalized());
   CHECK(adaptation.K() == 3);
+}
+
+// A period-4 cycle has rho_2 near -1, so the old min(q1, q2/2) guard read it
+// as excellent mixing and let it through. Inspecting more lags catches it:
+// lag 4 has (1 - rho_4) near zero.
+void test_longer_period_cycle_is_rejected() {
+  klhr::KAdaptationConfig config{
+    .initial_K = 15,
+    .maximum_K = 15,
+    .warmup_steps = 64,
+    .windowsize = 32,
+    .windowscale = 1,
+    .dimension = 1,
+    .minimum_window = 4,
+  };
+  klhr::KWindowedAdaptation adaptation(config);
+  for (std::size_t draw = 0; draw < 32; ++draw) {
+    adaptation.observe(healthy_observation(draw, 1.0, true));
+  }
+  CHECK(adaptation.K() == 15);
+
+  std::vector<std::size_t> attempts(16, 0);
+  for (std::size_t draw = 0; draw < 32; ++draw) {
+    const std::size_t K = adaptation.K();
+    const std::size_t index = attempts[K]++;
+    if (K == 15) {
+      // Large jumps, but the chain only ever visits four states in order.
+      adaptation.observe(cyclic_observation(index, 4, 100.0));
+    } else {
+      adaptation.observe(healthy_observation(index, 1.0, true));
+    }
+  }
+  CHECK(adaptation.finalized());
+  CHECK(adaptation.K() == 7);
+}
+
+// Candidates are tested in several interleaved blocks with the order
+// reversed on alternate rounds, so a linear drift through the window
+// contributes equally to each of them.
+void test_trials_are_interleaved_and_counterbalanced() {
+  klhr::KAdaptationConfig config{
+    .initial_K = 7,
+    .maximum_K = 15,
+    .warmup_steps = 512,
+    .windowsize = 256,
+    .windowscale = 1,
+    .dimension = 1,
+    .minimum_window = 16,
+  };
+  klhr::KWindowedAdaptation adaptation(config);
+  for (std::size_t draw = 0; draw < 256; ++draw) {
+    adaptation.observe(healthy_observation(draw, 1.0, true));
+  }
+
+  std::vector<std::size_t> order;
+  std::vector<std::size_t> attempts(16, 0);
+  for (std::size_t draw = 0; draw < 256; ++draw) {
+    const std::size_t K = adaptation.K();
+    if (order.empty() || order.back() != K) {
+      order.push_back(K);
+    }
+    adaptation.observe(healthy_observation(attempts[K]++, 1.0, true));
+  }
+
+  // Contiguous allocation would give exactly one run per candidate.
+  CHECK(order.size() >= 5);
+  std::vector<std::size_t> reversed(order.rbegin(), order.rend());
+  CHECK(order == reversed);
+
+  // Equal shares, up to the leftover draws that fall to the incumbent.
+  const auto& summaries = adaptation.last_summaries();
+  CHECK(summaries.size() == 3);
+  std::size_t lowest = std::numeric_limits<std::size_t>::max();
+  std::size_t highest = 0;
+  for (const auto& summary : summaries) {
+    lowest = std::min(lowest, summary.attempts);
+    highest = std::max(highest, summary.attempts);
+    CHECK(summary.reliable);
+    CHECK(std::isfinite(summary.log_density_integrated_time));
+  }
+  CHECK(highest - lowest <= 2);
+}
+
+// The ladder must actually reach the levels the fixed-K sweeps preferred.
+void test_default_ladder_reaches_measured_optima() {
+  const auto ladder = klhr::make_K_ladder(
+    klhr::KAdaptationConfig{}.maximum_K);
+  const auto has = [&](const std::size_t K) {
+    return std::find(ladder.begin(), ladder.end(), K) != ladder.end();
+  };
+  CHECK(has(127));
+  CHECK(has(255));
+  CHECK(has(511));
+  // Default start sits mid-ladder so either direction is reachable within
+  // the handful of window closures a warmup provides.
+  const std::size_t start = klhr::nearest_K_ladder_index(
+    ladder, klhr::KAdaptationConfig{}.initial_K);
+  CHECK(start >= 2);
+  CHECK(start + 2 < ladder.size());
 }
 
 void test_acceptance_and_radius_safeguards() {
@@ -311,7 +469,11 @@ int main() {
   test_enabled_mode_snaps_to_ladder();
   test_adjacent_candidates_share_one_window();
   test_lag_two_periodicity_moves_down();
-  test_near_tie_prefers_lower_adjacent_level();
+  test_small_gain_at_larger_K_is_taken();
+  test_worse_larger_level_is_rejected();
+  test_longer_period_cycle_is_rejected();
+  test_trials_are_interleaved_and_counterbalanced();
+  test_default_ladder_reaches_measured_optima();
   test_acceptance_and_radius_safeguards();
   return failures == 0 ? 0 : 1;
 }

@@ -3,6 +3,7 @@
 #include <windowedadaptation.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -69,17 +70,38 @@ inline std::size_t nearest_K_ladder_index(
 
 struct KAdaptationConfig {
   bool enabled = true;
-  std::size_t initial_K = 16;
-  std::size_t maximum_K = 63;
+  // The ceiling is high because measured optima on the reference models sit
+  // at K around 127 to 255, and each window only tests the incumbent's
+  // immediate neighbours, so the ladder has to extend past the optimum for
+  // the search to reach it.
+  //
+  // The starting level is deliberately *not* raised to match. Early in
+  // warmup the line fit is at its worst, and a large K proposes at the far
+  // antithetic quantile of that fit, which is exactly where a bad fit does
+  // the most damage: on earnings, starting at 63 rather than 15 cost a
+  // seed's worth of bulk-finding (36/40 against 37/40) with no gain, since
+  // the adaptation converges to the same level from either start. Let the
+  // search climb rather than beginning there.
+  std::size_t initial_K = 15;
+  std::size_t maximum_K = 511;
   std::size_t warmup_steps = 850;
   std::size_t windowsize = 50;
   std::size_t windowscale = 2;
   std::size_t dimension = 1;
   std::size_t minimum_window = 16;
+  // Deepest lag the refresh guard inspects; two reproduces the original
+  // lag-1/lag-2 test. Four catches period-3 and period-4 cycles that lag 2
+  // alone reads as excellent mixing, and measured identically to two on the
+  // reference models. Deeper than that the minimum over many noisy lag
+  // estimates is biased low and starts rejecting healthy large-K
+  // candidates: at eight lags, earnings fell from 168 to 108 min-ESS and
+  // its selected K from a median of 47 down to 15.
+  std::size_t refresh_lags = 4;
+  // False disables interleaving, giving each candidate one contiguous run.
+  bool interleave_trials = true;
   double minimum_acceptance = 0.5;
   double maximum_invalid_rate = 0.05;
   double minimum_refresh = 0.1;
-  double near_optimal_fraction = 0.05;
   double tolerance = 1e-10;
 };
 
@@ -101,6 +123,9 @@ struct KWindowSummary {
   double log_density_refresh = 0.0;
   bool radius_available = false;
   double radius_refresh = 0.0;
+  // Diagnostic only, not used for selection. See ScalarLagStats.
+  double log_density_integrated_time =
+    std::numeric_limits<double>::quiet_NaN();
   bool reliable = false;
   bool safe = false;
 };
@@ -219,70 +244,135 @@ private:
     }
   };
 
+  // Squared successive differences at several lags. For a stationary series
+  // E[(x_t - x_{t-k})^2] = 2 sigma^2 (1 - rho_k), so every lag reads off an
+  // autocorrelation without storing the series: only a ring buffer of the
+  // last max_lag values is kept, at O(max_lag) work per draw.
   struct ScalarLagStats {
+    static constexpr std::size_t max_lag = 8;
+    // A lag is only trusted once it has this many pairs, so short blocks
+    // degrade gracefully to the lag-1/lag-2 test this replaced.
+    static constexpr std::size_t minimum_pairs = 2;
+
+    std::array<double, max_lag> recent{};
+    std::array<double, max_lag> squared_difference{};
+    std::array<std::size_t, max_lag> pairs{};
+    std::size_t available = 0;
+    std::size_t position = 0;
     std::size_t history = 0;
-    double previous = 0.0;
-    double previous2 = 0.0;
-    std::size_t lag1_count = 0;
-    std::size_t lag2_count = 0;
-    double lag1_squared_difference = 0.0;
-    double lag2_squared_difference = 0.0;
 
     void update(const double value) {
       if (!std::isfinite(value)) {
         return;
       }
-      if (history >= 1) {
-        const double difference = value - previous;
+      const std::size_t usable = std::min(available, max_lag);
+      for (std::size_t k = 1; k <= usable; ++k) {
+        const double earlier = recent[(position + max_lag - k) % max_lag];
+        const double difference = value - earlier;
         const double squared = difference * difference;
         if (std::isfinite(squared)) {
-          lag1_squared_difference += squared;
-          ++lag1_count;
+          squared_difference[k - 1] += squared;
+          ++pairs[k - 1];
         }
       }
-      if (history >= 2) {
-        const double difference = value - previous2;
-        const double squared = difference * difference;
-        if (std::isfinite(squared)) {
-          lag2_squared_difference += squared;
-          ++lag2_count;
-        }
+      recent[position] = value;
+      position = (position + 1) % max_lag;
+      if (available < max_lag) {
+        ++available;
       }
-      previous2 = previous;
-      previous = value;
       ++history;
+    }
+
+    // A candidate's draws are spread over several blocks in the window, so
+    // differences must never span a boundary: the level under test changes
+    // there, and the gap is filled by other candidates' draws.
+    void end_block() {
+      available = 0;
+      position = 0;
+    }
+
+    std::size_t trusted_lags() const {
+      std::size_t lags = 0;
+      while (lags < max_lag && pairs[lags] >= minimum_pairs) {
+        ++lags;
+      }
+      return lags;
     }
 
     bool has_lags(const std::size_t minimum_count) const {
       return history >= minimum_count &&
-        lag1_count + 1 >= minimum_count &&
-        lag2_count + 2 >= minimum_count;
+        pairs[0] + 1 >= minimum_count &&
+        pairs[1] + 2 >= minimum_count;
     }
 
+    // Mixing rate, guarded against periodicity at any period the lags can
+    // see. For a geometrically decaying chain (1 - rho_k)/k is flat in k, so
+    // the minimum is just the mixing rate; for a chain cycling with period
+    // p, lag p has 1 - rho_p near zero and the minimum collapses. That is
+    // the pathology a near-deterministic overrelaxation level produces. With
+    // only two trusted lags this reduces exactly to the previous
+    // min(D*q1, 0.5*D*q2).
     double refresh(const std::size_t dimension,
                    const double reference_variance,
-                   const double tolerance) const {
+                   const double tolerance,
+                   const std::size_t maximum_lags) const {
       if (!(reference_variance > tolerance) ||
-          !std::isfinite(reference_variance) ||
-          lag1_count == 0 || lag2_count == 0) {
+          !std::isfinite(reference_variance)) {
         return 0.0;
       }
-      const double q1 = lag1_squared_difference /
-        (2.0 * reference_variance * static_cast<double>(lag1_count));
-      const double q2 = lag2_squared_difference /
-        (2.0 * reference_variance * static_cast<double>(lag2_count));
+      const std::size_t lags = std::min(trusted_lags(), maximum_lags);
+      if (lags < 2) {
+        return 0.0;
+      }
       const double D = static_cast<double>(std::max<std::size_t>(1, dimension));
-      return std::max(0.0, std::min(D * q1, 0.5 * D * q2));
+      double smallest = std::numeric_limits<double>::infinity();
+      for (std::size_t k = 1; k <= lags; ++k) {
+        const double q = squared_difference[k - 1] /
+          (2.0 * reference_variance * static_cast<double>(pairs[k - 1]));
+        smallest = std::min(smallest, D * q / static_cast<double>(k));
+      }
+      return std::isfinite(smallest) ? std::max(0.0, smallest) : 0.0;
+    }
+
+    // Geyer initial-positive-sequence integrated autocorrelation time,
+    // tau = 2 * sum_j (rho_2j + rho_2j+1) - 1, truncated at the first
+    // non-positive pair. Reported for diagnostics only: it is deliberately
+    // not the selection objective, because a near-deterministic two-cycle
+    // has a tiny integrated time while being exactly the failure mode the
+    // refresh guard exists to reject.
+    double integrated_time(const double reference_variance,
+                           const double tolerance) const {
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      if (!(reference_variance > tolerance) ||
+          !std::isfinite(reference_variance)) {
+        return nan;
+      }
+      const std::size_t lags = trusted_lags();
+      if (lags < 2) {
+        return nan;
+      }
+      const auto rho = [&](const std::size_t k) {
+        return 1.0 - squared_difference[k - 1] /
+          (2.0 * reference_variance * static_cast<double>(pairs[k - 1]));
+      };
+      double total = 0.0;
+      for (std::size_t k = 0; k + 1 <= lags; k += 2) {
+        const double pair_sum = (k == 0 ? 1.0 : rho(k)) + rho(k + 1);
+        if (!(pair_sum > 0.0)) {
+          break;
+        }
+        total += pair_sum;
+      }
+      return 2.0 * total - 1.0;
     }
 
     void reset() {
+      recent.fill(0.0);
+      squared_difference.fill(0.0);
+      pairs.fill(0);
+      available = 0;
+      position = 0;
       history = 0;
-      previous = 0.0;
-      previous2 = 0.0;
-      lag1_count = 0;
-      lag2_count = 0;
-      lag1_squared_difference = 0.0;
-      lag2_squared_difference = 0.0;
     }
   };
 
@@ -310,6 +400,11 @@ private:
       if (observation.radius_available) {
         radius.update(observation.radius);
       }
+    }
+
+    void end_block() {
+      log_density.end_block();
+      radius.end_block();
     }
 
     double robust_soft_esjd() const {
@@ -371,6 +466,8 @@ private:
     config.windowscale = std::max<std::size_t>(1, config.windowscale);
     config.dimension = std::max<std::size_t>(1, config.dimension);
     config.minimum_window = std::max<std::size_t>(3, config.minimum_window);
+    config.refresh_lags = std::clamp<std::size_t>(
+      config.refresh_lags, 2, ScalarLagStats::max_lag);
     config.minimum_acceptance = std::isfinite(config.minimum_acceptance) ?
       std::clamp(config.minimum_acceptance, 0.0, 1.0) : 0.5;
     config.maximum_invalid_rate =
@@ -378,9 +475,6 @@ private:
       std::clamp(config.maximum_invalid_rate, 0.0, 1.0) : 0.05;
     config.minimum_refresh = std::isfinite(config.minimum_refresh) ?
       std::max(0.0, config.minimum_refresh) : 0.1;
-    config.near_optimal_fraction =
-      std::isfinite(config.near_optimal_fraction) ?
-      std::clamp(config.near_optimal_fraction, 0.0, 1.0) : 0.05;
     if (!(config.tolerance > 0.0) || !std::isfinite(config.tolerance)) {
       config.tolerance = 1e-10;
     }
@@ -432,44 +526,69 @@ private:
       active_indices_.pop_back();
     }
 
-    std::vector<std::pair<std::size_t, std::size_t>> candidates;
-    if (active_indices_.size() == 1) {
-      candidates.push_back({active_indices_.front(), length});
-    } else if (active_indices_.size() == 2) {
-      const std::size_t first = length / 2;
-      candidates.push_back({active_indices_[0], first});
-      candidates.push_back({active_indices_[1], length - first});
-    } else {
-      const std::size_t lower = length / 4;
-      const std::size_t incumbent = length / 2;
-      candidates.push_back({active_indices_[0], lower});
-      candidates.push_back({active_indices_[1], incumbent});
-      candidates.push_back({active_indices_[2], length - lower - incumbent});
+    const std::size_t count = active_indices_.size();
+    if (count <= 1) {
+      if (length > 0 && count == 1) {
+        trial_blocks_.push_back(
+          {.end = length, .candidate = active_indices_.front()});
+      }
+      set_current_trial_(0);
+      return;
     }
 
-    if (windows_closed_ % 2 == 1) {
-      std::reverse(candidates.begin(), candidates.end());
-    }
+    // Candidates get equal shares, split into several interleaved blocks
+    // rather than one contiguous run each. Warmup is not stationary, so a
+    // contiguous layout confounds the comparison with whatever the chain
+    // was doing at that point in the window. Reversing the order on
+    // alternate rounds counterbalances a linear drift exactly, which is
+    // stronger than randomising the order would be, and it stays
+    // deterministic. Blocks are kept long enough to estimate the lags the
+    // refresh guard uses, since differences cannot cross a boundary.
+    const std::size_t per_candidate = length / count;
+    std::size_t block = std::min<std::size_t>(4 * ScalarLagStats::max_lag,
+                                              per_candidate);
+    block = std::max(block, std::min(config_.minimum_window, per_candidate));
+    const std::size_t rounds = (block > 0 && config_.interleave_trials) ?
+      std::max<std::size_t>(1, per_candidate / block) : 1;
+
     std::size_t end = 0;
-    for (const auto& [candidate, count] : candidates) {
-      if (count == 0) {
+    for (std::size_t round = 0; round < rounds; ++round) {
+      const std::size_t share = per_candidate / rounds +
+        (round < per_candidate % rounds ? 1 : 0);
+      if (share == 0) {
         continue;
       }
-      end += count;
-      trial_blocks_.push_back({.end = end, .candidate = candidate});
+      const bool forward = (round + windows_closed_) % 2 == 0;
+      for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t slot = forward ? i : count - 1 - i;
+        end += share;
+        trial_blocks_.push_back(
+          {.end = end, .candidate = active_indices_[slot]});
+      }
+    }
+    // Absorb the few draws that equal shares cannot cover into the final
+    // block, rather than leaving a stray unbalanced run at every window end.
+    if (!trial_blocks_.empty()) {
+      trial_blocks_.back().end = length;
     }
     set_current_trial_(0);
   }
 
   void set_current_trial_(const std::size_t position) {
+    const std::size_t previous = current_index_;
+    std::size_t selected = incumbent_index_;
     for (const TrialBlock& block : trial_blocks_) {
       if (position < block.end) {
-        current_index_ = block.candidate;
-        current_K_ = ladder_[current_index_];
-        return;
+        selected = block.candidate;
+        break;
       }
     }
-    current_index_ = incumbent_index_;
+    if (selected != previous && previous < candidate_windows_.size()) {
+      // Leaving a block: drop the ring buffer so the next run of draws for
+      // that candidate does not pair across the gap.
+      candidate_windows_[previous].end_block();
+    }
+    current_index_ = selected;
     current_K_ = ladder_[current_index_];
   }
 
@@ -491,12 +610,17 @@ private:
       1.0 - static_cast<double>(stats.valid) / attempts;
     summary.soft_esjd = stats.robust_soft_esjd();
     summary.log_density_refresh = stats.log_density.refresh(
-      config_.dimension, pooled_log_density_.variance(), config_.tolerance);
+      config_.dimension, pooled_log_density_.variance(), config_.tolerance,
+      config_.refresh_lags);
+    summary.log_density_integrated_time =
+      stats.log_density.integrated_time(
+        pooled_log_density_.variance(), config_.tolerance);
     summary.radius_available = radius_evidence_available &&
       stats.radius.has_lags(config_.minimum_window);
     if (summary.radius_available) {
       summary.radius_refresh = stats.radius.refresh(
-        config_.dimension, pooled_radius_.variance(), config_.tolerance);
+        config_.dimension, pooled_radius_.variance(), config_.tolerance,
+        config_.refresh_lags);
     }
 
     summary.reliable =
@@ -524,17 +648,20 @@ private:
       }
     }
 
+    // Take the best safe candidate outright. There used to be a
+    // near-optimal band that broke ties toward smaller K, which made sense
+    // when each overrelaxation cost O(K) work to evaluate its transition
+    // density. That density is gone from the Hastings ratio, so cost is now
+    // flat in K -- measured at roughly 620k gradient evaluations for every
+    // K from 0 to 1023 on earnings -- and the band only introduced a
+    // systematic downward bias. On an exact tie prefer the larger level.
     if (!safe.empty()) {
-      double best_score = 0.0;
-      for (const KWindowSummary* summary : safe) {
-        best_score = std::max(best_score, summary->soft_esjd);
-      }
-      const double threshold =
-        (1.0 - config_.near_optimal_fraction) * best_score;
       const KWindowSummary* selected = nullptr;
       for (const KWindowSummary* summary : safe) {
-        if (summary->soft_esjd >= threshold &&
-            (selected == nullptr || summary->K < selected->K)) {
+        if (selected == nullptr ||
+            summary->soft_esjd > selected->soft_esjd ||
+            (summary->soft_esjd == selected->soft_esjd &&
+             summary->K > selected->K)) {
           selected = summary;
         }
       }

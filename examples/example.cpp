@@ -31,6 +31,8 @@ int main(int argc, char** argv) {
     klhr::KlhrOptions{}.direction_min_diag_fraction;
   bool lowrank_during_warmup = klhr::KlhrOptions{}.lowrank_during_warmup;
   double pca_freeze_fraction = klhr::KlhrOptions{}.pca_freeze_fraction;
+  std::size_t lowrank_min_activations =
+    klhr::KlhrOptions{}.lowrank_min_activations;
   std::size_t initial_transport_steps = 150;
   std::size_t transport_max_reflections = 500;
   double transport_initial_distance = 1.0;
@@ -50,6 +52,8 @@ int main(int argc, char** argv) {
   std::size_t K = klhr::KlhrOptions{}.K;
   bool adapt_K = klhr::KlhrOptions{}.adapt_K;
   std::size_t K_max = klhr::KlhrOptions{}.K_max;
+  std::size_t K_refresh_lags = klhr::KlhrOptions{}.K_refresh_lags;
+  bool K_interleave_trials = klhr::KlhrOptions{}.K_interleave_trials;
 
   {
     CLI::App app{"Run an MCMC sampler."};
@@ -102,6 +106,11 @@ int main(int argc, char** argv) {
     app.add_option("--pca-freeze-fraction", pca_freeze_fraction,
                    "Fraction of the final adaptation window used to calibrate projected variances")
       ->default_val(pca_freeze_fraction);
+
+    app.add_option("--lowrank-min-activations", lowrank_min_activations,
+                   "Window closures required before the low-rank direction is used")
+      ->default_val(lowrank_min_activations)
+      ->check(CLI::PositiveNumber);
 
     app.add_option("--initial-transport-steps", initial_transport_steps,
                    "Initial nonstationary reflected-ray transport iterations")
@@ -169,6 +178,15 @@ int main(int argc, char** argv) {
                  "Adapt K during post-transport warmup")
       ->default_val(adapt_K);
 
+    app.add_option("--K-refresh-lags", K_refresh_lags,
+                   "Deepest lag the K refresh guard inspects (2 = original test)")
+      ->default_val(K_refresh_lags)
+      ->check(CLI::NonNegativeNumber);
+
+    app.add_flag("--K-interleave,!--no-K-interleave", K_interleave_trials,
+                 "Interleave K trial blocks instead of one contiguous run each")
+      ->default_val(K_interleave_trials);
+
     app.add_option("--K-max", K_max,
                    "Largest K the adaptation ladder may reach")
       ->default_val(K_max)
@@ -185,12 +203,15 @@ int main(int argc, char** argv) {
     .K = K,
     .adapt_K = adapt_K,
     .K_max = K_max,
+    .K_refresh_lags = K_refresh_lags,
+    .K_interleave_trials = K_interleave_trials,
     .warmup = num_warmup,
     .J = J,
     .direction_lowrank_weight = direction_lowrank_weight,
     .direction_min_diag_fraction = direction_min_diag_fraction,
     .lowrank_during_warmup = lowrank_during_warmup,
     .pca_freeze_fraction = pca_freeze_fraction,
+    .lowrank_min_activations = lowrank_min_activations,
     .initial_transport_steps = initial_transport_steps,
     .transport_max_reflections = transport_max_reflections,
     .transport_initial_distance = transport_initial_distance,
