@@ -22,8 +22,6 @@
 #include <string>
 #include <system_error>
 
-// TODO store warmup in database
-
 using json = nlohmann::json;
 
 json parse_json(const std::filesystem::path& config_path, std::size_t index) {
@@ -164,7 +162,7 @@ int main(int argc, char** argv) {
   const std::uint64_t base_seed = cfg.at("seed").get<std::uint64_t>();
   const std::size_t iterations = cfg.at("iterations").get<std::size_t>();
   const std::size_t warmup = cfg.at("warmup").get<std::size_t>();
-  Eigen::Index J = 1;
+  Eigen::Index J = 10;
   if (cfg.contains("J")) {
     J = cfg.at("J").get<Eigen::Index>();
   }

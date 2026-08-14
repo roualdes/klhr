@@ -31,11 +31,13 @@ protected:
 
   double overrelaxed_proposal_(const Eigen::VectorXd& eta,
                                const double from) override {
-    auto [m, s, e] = unpack_sas_(eta);
+    const auto [m_, s, e_] = unpack_sas_(eta);
+    const double m = m_;
+    const double e = e_;
     const double ss = std::max(s, opts_.tol);
-    const double u = normal_cdf_(Tinv_(from, m, ss, e));
-    const double up = overrelaxed_proposal_impl_(u);
-    return T_(normal_quantile(clamp_probability_(up)), m, ss, e);
+    return overrelaxed_proposal_from_cdf_(
+      normal_cdf_(Tinv_(from, m, ss, e)),
+      [this, m, ss, e](const double z) { return T_(z, m, ss, e); });
   }
 
   double log_line_density_(const double t,
@@ -83,8 +85,10 @@ protected:
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
       line_grad = grad_logp.dot(rho);
-      // TODO: does this check prevent any log density gradient checks?
-      // It doesn't seem so to me.
+      // Covers everything KL_ consumes: only the projection of grad_logp on
+      // rho enters the objective, and a NaN or infinity anywhere in the vector
+      // reaches line_grad. See the matching note in NormalKLHR::KL_, including
+      // the caveat that a finite grad_clip masks an infinite gradient here.
       if (!std::isfinite(logp) || !std::isfinite(line_grad)) {
         set_bad_kl_(eta, value, grad);
         return;

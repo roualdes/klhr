@@ -30,11 +30,12 @@ protected:
 
   double overrelaxed_proposal_(const Eigen::VectorXd& eta,
                                const double from) override {
-    auto [mu, sigma] = unpack_(eta);
+    const auto [mu_, sigma] = unpack_(eta);
+    const double mu = mu_;
     const double s = std::max(sigma, opts_.tol);
-    const double u = normal_cdf_((from - mu) / s);
-    const double up = overrelaxed_proposal_impl_(u);
-    return mu + s * normal_quantile(clamp_probability_(up));
+    return overrelaxed_proposal_from_cdf_(
+      normal_cdf_((from - mu) / s),
+      [mu, s](const double z) { return mu + s * z; });
   }
 
   double log_line_density_(const double t,
@@ -72,8 +73,18 @@ protected:
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
       grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
       w_grad_rho = wn * grad_logp.dot(rho);
-      // TODO: does this check prevent any log density gradient checks?
-      // It doesn't seem so to me.
+      // This covers everything KL_ consumes. The only part of grad_logp that
+      // reaches the objective is its projection on rho, and a NaN or an
+      // infinity anywhere in the vector reaches w_grad_rho: Eigen's min/max
+      // propagate NaN in this argument order, and an infinite component either
+      // survives the dot product or meets a zero rho_d and turns it NaN. There
+      // is deliberately no componentwise check, because a garbage component
+      // orthogonal to rho cannot affect the fit.
+      //
+      // One caveat, and it belongs to the clip rather than to the check: with
+      // a finite grad_clip an infinite gradient is clipped to +/-grad_clip
+      // *before* this line, so the point then looks feasible. The default
+      // grad_clip is infinite, which leaves infinities intact.
       if (!std::isfinite(logp) || !std::isfinite(w_grad_rho)) {
         set_bad_kl_(eta, value, grad);
         return;
