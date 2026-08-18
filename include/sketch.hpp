@@ -7,174 +7,124 @@
 #include <cstdint>
 #include <random>
 #include <stdexcept>
+#include <utility>
 
 namespace klhr {
 
-// Single-pass Nystrom sketch of the covariance of the centered draws.
-//
-// A fixed Gaussian probe matrix Omega (D by m) is drawn once, and the sketch
-// accumulates
-//
-//     Y = sum_i x_i (x_i' Omega) = S Omega,      S the scatter matrix
-//
-// one rank-one update per draw. At a window close the m-by-m matrix Omega'Y =
-// Omega' S Omega is formed and the Nystrom approximation
-//
-//     S  ~  Y (Omega' S Omega)^+ Y'
-//
-// gives a square root F with F F' approximating the covariance, using every
-// draw in the window at O(D m) memory and O(D m) work per draw. Nothing
-// D-by-D is ever formed.
-//
-// Used only by the mixture's SKETCH component, which needs a square root to
-// sample directions from. It was also trialled as a drop-in replacement for
-// the incremental OnlinePCA basis and made no difference: across four models,
-// four ranks and two error metrics, not one comparison resolved away from
-// parity. OnlinePCA was never the bottleneck for the covariance direction law,
-// so that path was removed.
-//
-// (An earlier ring-buffer version, holding only the last m states with m
-// clamped at D, did lose to OnlinePCA by 2.3x on corr-normal at J=10 -- but
-// that was sample starvation, not the estimator. Hence the streaming form
-// here, which uses every draw in the window.)
-//
-// The buffer holds centered states rather than lagged differences on purpose.
-// For a stationary chain the covariance of lag-L differences is
-// 2 (Sigma - Sigma_L), whose eigenstructure suppresses exactly the slowly
-// mixing directions a direction law most needs to propose along. The scale
-// would be harmless -- it is absorbed when rho is normalised -- the shape is
-// not.
-class Sketch {
+// A single-pass Nystrom estimate of a sample covariance. The sketch owns its
+// centering, so callers pass raw positions.
+class CovarianceSketch {
 public:
-  Sketch(Eigen::Index D = 0, Eigen::Index m = 0, double tol = 1e-10,
-         std::uint64_t seed = 1) :
-    D_(checked_dimension_(D)),
-    m_(checked_dimension_(m)),
-    tol_(tol),
-    Omega_(Eigen::MatrixXd::Zero(D_, std::max<Eigen::Index>(m_, 1))),
-    Y_(Eigen::MatrixXd::Zero(D_, std::max<Eigen::Index>(m_, 1))),
-    count_(0) {
-    if (m_ > 0 && D_ > 0) {
-      // The probes are fixed for the life of the run: re-drawing them each
-      // window would make successive bases incomparable for no benefit.
-      std::mt19937_64 gen(seed == 0 ? 1 : seed);
+  CovarianceSketch(Eigen::Index dimension = 0,
+                   Eigen::Index columns = 0,
+                   double tolerance = 1e-10,
+                   std::uint64_t seed = 1) :
+    dimension_(checked_dimension_(dimension)),
+    columns_(checked_dimension_(columns)),
+    tolerance_(tolerance),
+    probes_(Eigen::MatrixXd::Zero(
+      dimension_, std::max<Eigen::Index>(columns_, 1))),
+    image_(Eigen::MatrixXd::Zero(
+      dimension_, std::max<Eigen::Index>(columns_, 1))),
+    sum_(Eigen::VectorXd::Zero(dimension_)) {
+    if (columns_ > 0 && dimension_ > 0) {
+      std::mt19937_64 generator(seed == 0 ? 1 : seed);
       std::normal_distribution<double> normal(0.0, 1.0);
-      for (Eigen::Index j = 0; j < m_; ++j) {
-        for (Eigen::Index i = 0; i < D_; ++i) {
-          Omega_(i, j) = normal(gen);
+      for (Eigen::Index j = 0; j < columns_; ++j) {
+        for (Eigen::Index i = 0; i < dimension_; ++i) {
+          probes_(i, j) = normal(generator);
         }
       }
     }
   }
 
-  void update(const Eigen::Ref<const Eigen::VectorXd>& centered) {
-    if (m_ <= 0) {
+  void update(const Eigen::Ref<const Eigen::VectorXd>& sample) {
+    if (columns_ <= 0) {
       return;
     }
-    if (centered.size() != D_) {
-      throw std::invalid_argument("Sketch::update: input dimension mismatch");
+    if (sample.size() != dimension_) {
+      throw std::invalid_argument(
+        "CovarianceSketch::update: input dimension mismatch");
     }
-    if (!centered.allFinite()) {
+    if (!sample.allFinite()) {
       return;
     }
-    // Y += x (x' Omega): one rank-one update, O(D m).
-    Y_.noalias() += centered * (centered.transpose() * Omega_);
+    image_.noalias() += sample * (sample.transpose() * probes_);
+    sum_ += sample;
     ++count_;
   }
 
-  // Remove the bias from having centred on a stale mean.
-  //
-  // With x_i = u_i + delta, where u_i is centred on the window's own mean and
-  // delta is the shift between that and the mean actually used,
-  //
-  //   Y = sum_i x_i (x_i' Omega)
-  //     = Y_true + (sum_i u_i)(delta' Omega) + delta (sum_i u_i)' Omega
-  //       + n delta (delta' Omega)
-  //     = Y_true + n delta (delta' Omega),
-  //
-  // since sum_i u_i vanishes. The correction is therefore exact, not an
-  // approximation, and costs one rank-one update.
-  //
-  // Without it the scatter is inflated by the square of the within-window
-  // drift, which is why a rank-20 subspace was reporting up to 188% of the
-  // total variance -- impossible for any correct estimator, and worst on the
-  // slowest-mixing high-dimensional targets.
-  void recenter(const Eigen::Ref<const Eigen::VectorXd>& delta) {
-    if (m_ <= 0 || count_ <= 0 || delta.size() != D_ || !delta.allFinite()) {
-      return;
-    }
-    Y_.noalias() -= static_cast<double>(count_) *
-      (delta * (delta.transpose() * Omega_));
-  }
-
   void reset() {
-    Y_.setZero();
+    image_.setZero();
+    sum_.setZero();
     count_ = 0;
-  }
-
-  // The sketch as a probe/image pair source for the fused fit: the probes are
-  // Omega and the images are Y / count, since E[Y_j] = n Sigma Omega_j. Two
-  // sketches constructed with the same seed and dimensions share Omega
-  // exactly, which is what lets a window be split into halves whose images are
-  // directly comparable.
-  const Eigen::MatrixXd& probes() const { return Omega_; }
-
-  bool mean_image(Eigen::MatrixXd& out) const {
-    if (m_ <= 0 || count_ <= 0) {
-      return false;
-    }
-    out = Y_ / static_cast<double>(count_);
-    return out.allFinite();
   }
 
   Eigen::Index count() const { return count_; }
 
-  // Square root B with B B' = sum_j sigma2_j u_j u_j', the sketched
-  // covariance.
+  // Return leading eigenpairs of
   //
-  // Spectral shrinkage -- subtracting a multiple of the median eigenvalue from
-  // each, so that an all-bulk spectrum collapses and the component drops out
-  // on its own -- was added here as a structure test and measured not to be
-  // one. At ESS/D between 0.09 and 0.26 on these targets the spectrum is
-  // noise-dominated whatever the truth is, so ar1 (strongly correlated) and
-  // ill-normal (not correlated at all) kept indistinguishable rank at every
-  // threshold tried. Removed; the rank cap is the only knob left.
-  bool factor(Eigen::MatrixXd& B,
-              const Eigen::Index max_rank = 0) const {
-    Eigen::MatrixXd F;
-    Eigen::MatrixXd U;
-    Eigen::VectorXd sigma2;
-    if (!build_factor_(F) || !spectrum_(F, U, sigma2)) {
+  //   diag(row_scale) Cov(sample) diag(row_scale).
+  //
+  // The covariance is first approximated in its raw coordinates, then the
+  // small factor is row-scaled and diagonalised.
+  bool eigenpairs(const Eigen::Ref<const Eigen::VectorXd>& row_scale,
+                  Eigen::MatrixXd& directions,
+                  Eigen::VectorXd& eigenvalues,
+                  const Eigen::Index maximum_rank,
+                  const double eigenvalue_cutoff) const {
+    directions.resize(0, 0);
+    eigenvalues.resize(0);
+    if (row_scale.size() != dimension_ || !row_scale.allFinite() ||
+        (row_scale.array() <= 0.0).any()) {
       return false;
     }
-    const Eigen::Index k = sigma2.size();
-    // spectrum_ returns eigenvalues in descending order.
+
+    Eigen::MatrixXd factor;
+    if (!build_factor_(factor)) {
+      return false;
+    }
+    factor.array().colwise() *= row_scale.array();
+
+    Eigen::MatrixXd all_directions;
+    Eigen::VectorXd all_values;
+    if (!spectrum_(factor, all_directions, all_values)) {
+      return false;
+    }
+
     Eigen::Index rank = 0;
-    while (rank < k && sigma2(rank) > 0.0) {
+    while (rank < all_values.size() &&
+           all_values(rank) >= eigenvalue_cutoff) {
       ++rank;
     }
-    if (max_rank > 0) {
-      rank = std::min(rank, max_rank);
+    if (maximum_rank > 0) {
+      rank = std::min(rank, maximum_rank);
     }
     if (rank <= 0) {
       return false;
     }
-    B.resize(D_, rank);
-    for (Eigen::Index j = 0; j < rank; ++j) {
-      B.col(j) = std::sqrt(sigma2(j)) * U.col(j);
-    }
-    return B.allFinite();
+
+    directions = all_directions.leftCols(rank);
+    eigenvalues = all_values.head(rank);
+    return directions.allFinite() && eigenvalues.allFinite();
   }
 
 private:
-  // F with F F' ~ covariance, from the Nystrom identity. Eigendecomposing
-  // Omega'Y rather than taking its Cholesky keeps this well defined while the
-  // window is still short and the scatter is rank deficient.
-  bool build_factor_(Eigen::MatrixXd& F) const {
-    if (m_ <= 0 || count_ <= 1) {
+  // If s = sum_i x_i, the centered scatter image is
+  //
+  //   (sum_i x_i x_i' - s s' / n) Omega.
+  //
+  // Its Nystrom approximation is factored without forming a D-by-D matrix.
+  bool build_factor_(Eigen::MatrixXd& factor) const {
+    if (columns_ <= 0 || count_ <= 1) {
       return false;
     }
-    Eigen::MatrixXd core = Omega_.transpose() * Y_;
+
+    Eigen::MatrixXd centered_image = image_;
+    centered_image.noalias() -=
+      (sum_ / static_cast<double>(count_)) * (sum_.transpose() * probes_);
+
+    Eigen::MatrixXd core = probes_.transpose() * centered_image;
     core = (0.5 * (core + core.transpose())).eval();
     if (!core.allFinite()) {
       return false;
@@ -184,82 +134,346 @@ private:
     if (solver.info() != Eigen::Success) {
       return false;
     }
-    const Eigen::VectorXd& lambda = solver.eigenvalues();
-    const double lambda_max = lambda(m_ - 1);
-    if (!std::isfinite(lambda_max) || lambda_max <= tol_) {
+    const Eigen::VectorXd& values = solver.eigenvalues();
+    const double maximum = values(columns_ - 1);
+    if (!std::isfinite(maximum) || maximum <= tolerance_) {
       return false;
     }
 
     Eigen::Index keep = 0;
-    while (keep < m_ && lambda(m_ - 1 - keep) > 1e-10 * lambda_max) {
+    while (keep < columns_ &&
+           values(columns_ - 1 - keep) > 1e-10 * maximum) {
       ++keep;
     }
     if (keep <= 0) {
       return false;
     }
 
-    const double scale = 1.0 / std::sqrt(static_cast<double>(count_));
-    F.resize(D_, keep);
+    factor.resize(dimension_, keep);
+    const double covariance_scale =
+      1.0 / std::sqrt(static_cast<double>(count_));
     for (Eigen::Index j = 0; j < keep; ++j) {
-      const Eigen::Index source = m_ - 1 - j;
-      F.col(j) = scale * (Y_ * solver.eigenvectors().col(source)) /
-        std::sqrt(lambda(source));
+      const Eigen::Index source = columns_ - 1 - j;
+      factor.col(j) = covariance_scale *
+        (centered_image * solver.eigenvectors().col(source)) /
+        std::sqrt(values(source));
     }
-    return F.allFinite();
+    return factor.allFinite();
   }
 
-  // Left singular vectors and squared singular values of F, recovered from
-  // the small Gram F'F so that nothing D-by-D is decomposed.
-  bool spectrum_(const Eigen::MatrixXd& F, Eigen::MatrixXd& U,
-                 Eigen::VectorXd& sigma2) const {
-    Eigen::MatrixXd G = F.transpose() * F;
-    G = (0.5 * (G + G.transpose())).eval();
-    if (!G.allFinite()) {
+  static bool spectrum_(const Eigen::MatrixXd& factor,
+                        Eigen::MatrixXd& directions,
+                        Eigen::VectorXd& eigenvalues) {
+    Eigen::MatrixXd gram = factor.transpose() * factor;
+    gram = (0.5 * (gram + gram.transpose())).eval();
+    if (!gram.allFinite()) {
       return false;
     }
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(G);
+
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(gram);
     if (solver.info() != Eigen::Success) {
       return false;
     }
     const Eigen::VectorXd& values = solver.eigenvalues();
-    const Eigen::Index k = values.size();
-    const double value_max = values(k - 1);
-    if (!std::isfinite(value_max) || value_max <= tol_) {
+    const Eigen::Index size = values.size();
+    const double maximum = values(size - 1);
+    if (!std::isfinite(maximum) || maximum <= 0.0) {
       return false;
     }
 
     Eigen::Index keep = 0;
-    while (keep < k && values(k - 1 - keep) > 1e-12 * value_max) {
+    while (keep < size && values(size - 1 - keep) > 1e-12 * maximum) {
       ++keep;
     }
     if (keep <= 0) {
       return false;
     }
 
-    U.resize(D_, keep);
-    sigma2.resize(keep);
+    directions.resize(factor.rows(), keep);
+    eigenvalues.resize(keep);
     for (Eigen::Index j = 0; j < keep; ++j) {
-      const Eigen::Index source = k - 1 - j;
+      const Eigen::Index source = size - 1 - j;
       const double value = values(source);
-      U.col(j) = (F * solver.eigenvectors().col(source)) / std::sqrt(value);
-      sigma2(j) = value;
+      directions.col(j) =
+        (factor * solver.eigenvectors().col(source)) / std::sqrt(value);
+      eigenvalues(j) = value;
     }
-    return U.allFinite() && sigma2.allFinite();
+    return directions.allFinite() && eigenvalues.allFinite();
   }
 
   static Eigen::Index checked_dimension_(const Eigen::Index value) {
     if (value < 0) {
-      throw std::invalid_argument("Sketch: dimensions must be nonnegative");
+      throw std::invalid_argument(
+        "CovarianceSketch: dimensions must be nonnegative");
     }
     return value;
   }
 
-  Eigen::Index D_;
-  Eigen::Index m_;
-  double tol_;
-  Eigen::MatrixXd Omega_;
-  Eigen::MatrixXd Y_;
-  Eigen::Index count_;
+  Eigen::Index dimension_;
+  Eigen::Index columns_;
+  double tolerance_;
+  Eigen::MatrixXd probes_;
+  Eigen::MatrixXd image_;
+  Eigen::VectorXd sum_;
+  Eigen::Index count_ = 0;
+};
+
+// Common spectral direction law. Estimators only have to supply orthonormal
+// directions and their covariance eigenvalues; rank diagnostics, trace
+// allocation and drawing are identical after that point.
+class TraceControlledDirection {
+public:
+  void begin_refresh() {
+    ready_ = false;
+    directions_.resize(0, 0);
+    square_root_spectrum_.resize(0);
+    spectrum_sum_ = 0.0;
+  }
+
+  bool install(Eigen::MatrixXd directions,
+               Eigen::VectorXd covariance_eigenvalues) {
+    if (directions.cols() <= 0 ||
+        directions.cols() != covariance_eigenvalues.size() ||
+        !directions.allFinite() || !covariance_eigenvalues.allFinite() ||
+        (covariance_eigenvalues.array() <= 0.0).any()) {
+      finish_refresh_(false);
+      return false;
+    }
+    directions_ = std::move(directions);
+    spectrum_sum_ = covariance_eigenvalues.sum();
+    square_root_spectrum_ = covariance_eigenvalues.array().sqrt().matrix();
+    const bool valid = square_root_spectrum_.allFinite() &&
+      std::isfinite(spectrum_sum_) && spectrum_sum_ > 0.0;
+    finish_refresh_(valid);
+    return valid;
+  }
+
+  Eigen::VectorXd transform(
+      Eigen::VectorXd full_rank_standard_normal,
+      const Eigen::Ref<const Eigen::VectorXd>& subspace_standard_normal,
+      const double residual_fraction) const {
+    if (!ready_) {
+      return full_rank_standard_normal;
+    }
+    if (full_rank_standard_normal.size() != directions_.rows() ||
+        subspace_standard_normal.size() != directions_.cols()) {
+      throw std::invalid_argument(
+        "TraceControlledDirection::transform: input dimension mismatch");
+    }
+
+    const double residual = std::clamp(residual_fraction, 0.0, 1.0);
+    const double subspace_scale = std::sqrt(
+      (1.0 - residual) * static_cast<double>(directions_.rows()) /
+      spectrum_sum_);
+    full_rank_standard_normal *= std::sqrt(residual);
+    full_rank_standard_normal.noalias() += subspace_scale * directions_ *
+      square_root_spectrum_.cwiseProduct(subspace_standard_normal);
+    return full_rank_standard_normal;
+  }
+
+  Eigen::VectorXd pure_transform(
+      const Eigen::Ref<const Eigen::VectorXd>& subspace_standard_normal) const {
+    if (!ready_) {
+      return Eigen::VectorXd::Zero(directions_.rows());
+    }
+    if (subspace_standard_normal.size() != directions_.cols()) {
+      throw std::invalid_argument(
+        "TraceControlledDirection::pure_transform: input dimension mismatch");
+    }
+
+    const double subspace_scale = std::sqrt(
+      static_cast<double>(directions_.rows()) / spectrum_sum_);
+    return subspace_scale * directions_ *
+      square_root_spectrum_.cwiseProduct(subspace_standard_normal);
+  }
+
+  void reset() {
+    directions_.resize(0, 0);
+    square_root_spectrum_.resize(0);
+    spectrum_sum_ = 0.0;
+    ready_ = false;
+    last_rank_ = 0;
+    refreshes_ = 0;
+    rank_total_ = 0;
+    dropouts_ = 0;
+  }
+
+  bool ready() const { return ready_; }
+  Eigen::Index rank() const { return last_rank_; }
+  std::size_t dropouts() const { return dropouts_; }
+  double mean_rank() const {
+    return refreshes_ == 0 ? 0.0 :
+      static_cast<double>(rank_total_) / static_cast<double>(refreshes_);
+  }
+
+private:
+  void finish_refresh_(const bool valid) {
+    ready_ = valid;
+    last_rank_ = ready_ ? directions_.cols() : 0;
+    ++refreshes_;
+    rank_total_ += static_cast<std::size_t>(last_rank_);
+    if (!ready_) {
+      directions_.resize(0, 0);
+      square_root_spectrum_.resize(0);
+      spectrum_sum_ = 0.0;
+      ++dropouts_;
+    }
+  }
+
+  Eigen::MatrixXd directions_;
+  Eigen::VectorXd square_root_spectrum_;
+  double spectrum_sum_ = 0.0;
+  bool ready_ = false;
+  Eigen::Index last_rank_ = 0;
+  std::size_t refreshes_ = 0;
+  std::size_t rank_total_ = 0;
+  std::size_t dropouts_ = 0;
+};
+
+// Position samples estimate broad covariance eigenpairs directly.
+class PositionSketch {
+public:
+  PositionSketch(Eigen::Index dimension,
+                 Eigen::Index columns,
+                 double tolerance,
+                 std::uint64_t seed) :
+    covariance_(dimension, columns, tolerance, seed) {}
+
+  void update(const Eigen::Ref<const Eigen::VectorXd>& position) {
+    covariance_.update(position);
+  }
+
+  void refresh(const Eigen::Ref<const Eigen::VectorXd>& metric_scale,
+               const Eigen::Index maximum_rank,
+               const double eigenvalue_cutoff) {
+    direction_.begin_refresh();
+    Eigen::MatrixXd directions;
+    Eigen::VectorXd eigenvalues;
+    const Eigen::VectorXd row_scale = metric_scale.cwiseInverse();
+    const bool ready = covariance_.eigenpairs(
+      row_scale, directions, eigenvalues, maximum_rank, eigenvalue_cutoff);
+    covariance_.reset();
+    if (ready) {
+      direction_.install(std::move(directions), std::move(eigenvalues));
+    } else {
+      direction_.install(Eigen::MatrixXd{}, Eigen::VectorXd{});
+    }
+  }
+
+  Eigen::VectorXd transform(
+      Eigen::VectorXd full_rank_standard_normal,
+      const Eigen::Ref<const Eigen::VectorXd>& subspace_standard_normal,
+      const double residual_fraction) const {
+    return direction_.transform(std::move(full_rank_standard_normal),
+                                subspace_standard_normal,
+                                residual_fraction);
+  }
+
+  void reset() { covariance_.reset(); direction_.reset(); }
+  bool ready() const { return direction_.ready(); }
+  Eigen::Index rank() const { return direction_.rank(); }
+  std::size_t dropouts() const { return direction_.dropouts(); }
+  double mean_rank() const { return direction_.mean_rank(); }
+
+private:
+  CovarianceSketch covariance_;
+  TraceControlledDirection direction_;
+};
+
+// Direct local curvature in standardized coordinates. The caller supplies the
+// negative log-density Hessian H and diagonal metric scale S. We diagonalise
+// A = S H S, then use the broad covariance modes (the smallest eigenvalues of
+// A, inverted) as a pure low-rank direction law. A non-positive local Hessian
+// disables the component for that window rather than silently repairing it.
+class CurvatureDirection {
+public:
+  CurvatureDirection(Eigen::Index dimension = 0,
+                     double tolerance = 1e-10) :
+    dimension_(checked_dimension_(dimension)),
+    tolerance_(tolerance) {}
+
+  bool refresh(const Eigen::Ref<const Eigen::MatrixXd>& negative_hessian,
+               const Eigen::Ref<const Eigen::VectorXd>& metric_scale,
+               const Eigen::Index maximum_rank,
+               const double covariance_eigenvalue_cutoff) {
+    direction_.begin_refresh();
+    if (dimension_ <= 0 || negative_hessian.rows() != dimension_ ||
+        negative_hessian.cols() != dimension_ ||
+        metric_scale.size() != dimension_ ||
+        !negative_hessian.allFinite() || !metric_scale.allFinite() ||
+        (metric_scale.array() <= 0.0).any()) {
+      return fail_();
+    }
+
+    Eigen::MatrixXd standardized = metric_scale.asDiagonal() *
+      negative_hessian * metric_scale.asDiagonal();
+    standardized =
+      (0.5 * (standardized + standardized.transpose())).eval();
+    if (!standardized.allFinite()) {
+      return fail_();
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(standardized);
+    if (solver.info() != Eigen::Success) {
+      return fail_();
+    }
+
+    const Eigen::VectorXd& curvatures = solver.eigenvalues();
+    const double scale = std::max(1.0, curvatures.cwiseAbs().maxCoeff());
+    const double positive_tolerance = tolerance_ * scale;
+    if (!curvatures.allFinite() ||
+        (curvatures.array() <= positive_tolerance).any()) {
+      return fail_();
+    }
+
+    const Eigen::Index rank = std::clamp(
+      maximum_rank, Eigen::Index{1}, dimension_);
+    Eigen::Index retained = 0;
+    while (retained < dimension_ && retained < rank) {
+      if (1.0 / curvatures(retained) < covariance_eigenvalue_cutoff) {
+        break;
+      }
+      ++retained;
+    }
+    if (retained <= 0) {
+      return fail_();
+    }
+
+    return direction_.install(
+      solver.eigenvectors().leftCols(retained),
+      curvatures.head(retained).cwiseInverse());
+  }
+
+  Eigen::VectorXd transform(
+      const Eigen::Ref<const Eigen::VectorXd>& subspace_standard_normal) const {
+    if (!ready()) {
+      return Eigen::VectorXd::Zero(dimension_);
+    }
+    return direction_.pure_transform(subspace_standard_normal);
+  }
+
+  void reset() { direction_.reset(); }
+  bool ready() const { return direction_.ready(); }
+  Eigen::Index rank() const { return direction_.rank(); }
+  std::size_t dropouts() const { return direction_.dropouts(); }
+  double mean_rank() const { return direction_.mean_rank(); }
+
+private:
+  bool fail_() {
+    direction_.install(Eigen::MatrixXd{}, Eigen::VectorXd{});
+    return false;
+  }
+
+  static Eigen::Index checked_dimension_(const Eigen::Index value) {
+    if (value < 0) {
+      throw std::invalid_argument(
+        "CurvatureDirection: dimensions must be nonnegative");
+    }
+    return value;
+  }
+
+  Eigen::Index dimension_;
+  double tolerance_;
+  TraceControlledDirection direction_;
 };
 
 } // namespace klhr

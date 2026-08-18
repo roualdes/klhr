@@ -37,22 +37,22 @@ int main(int argc, char** argv) {
   Eigen::Index sketch_columns = klhr::KlhrOptions{}.sketch_columns;
   Eigen::Index transport_J = klhr::KlhrOptions{}.transport_J;
   bool mixture_direction = klhr::KlhrOptions{}.mixture_direction;
+  bool position_sketch_direction =
+    klhr::KlhrOptions{}.position_sketch_direction;
+  bool curvature_sketch_direction = klhr::KlhrOptions{}.curvature_sketch_direction;
   Eigen::Index sketch_max_rank = klhr::KlhrOptions{}.sketch_max_rank;
-  double hess_gate_native_threshold =
-    klhr::KlhrOptions{}.hess_gate_native_threshold;
-  bool anisotropy_gate_fail_open =
-    klhr::KlhrOptions{}.anisotropy_gate_fail_open;
+  Eigen::Index curvature_max_rank = klhr::KlhrOptions{}.curvature_max_rank;
+  double sketch_eigenvalue_cutoff =
+    klhr::KlhrOptions{}.sketch_eigenvalue_cutoff;
+  double sketch_residual_fraction =
+    klhr::KlhrOptions{}.sketch_residual_fraction;
   double mixture_floor_diagonal = klhr::KlhrOptions{}.mixture_floor_diagonal;
+  double mixture_floor_position = klhr::KlhrOptions{}.mixture_floor_position;
+  double mixture_floor_curvature = klhr::KlhrOptions{}.mixture_floor_curvature;
   double bandit_shrink = klhr::KlhrOptions{}.bandit_shrink;
-  double mixture_prior_sketch = klhr::KlhrOptions{}.mixture_prior_sketch;
+  double mixture_prior_position = klhr::KlhrOptions{}.mixture_prior_position;
+  double mixture_prior_curvature = klhr::KlhrOptions{}.mixture_prior_curvature;
   std::size_t terminal_buffer = klhr::KlhrOptions{}.terminal_buffer;
-  Eigen::Index hessian_oversample = klhr::KlhrOptions{}.hessian_oversample;
-  std::size_t hessian_cg_iterations =
-    klhr::KlhrOptions{}.hessian_cg_iterations;
-  std::size_t hessian_max_refreshes =
-    klhr::KlhrOptions{}.hessian_max_refreshes;
-  std::size_t hessian_factor_iterations =
-    klhr::KlhrOptions{}.hessian_factor_iterations;
   std::size_t initial_transport_steps = 150;
   std::size_t transport_max_reflections = 500;
   double transport_initial_distance = 1.0;
@@ -148,53 +148,64 @@ int main(int argc, char** argv) {
     app.add_flag("--mixture-direction,!--no-mixture-direction",
                  mixture_direction,
                  "Draw directions from an adaptively weighted mixture of "
-                 "diagonal, sketched-covariance and curvature components")
+                 "diagonal, position-sketch and direct-curvature components")
       ->default_val(mixture_direction);
 
+    app.add_flag("--position-sketch,!--no-position-sketch",
+                 position_sketch_direction,
+                 "Enable the position-sketch mixture component")
+      ->default_val(position_sketch_direction);
+
+    app.add_flag("--curvature-sketch,!--no-curvature-sketch",
+                 curvature_sketch_direction,
+                 "Enable the direct-Hessian curvature mixture component")
+      ->default_val(curvature_sketch_direction);
+
     app.add_option("--sketch-max-rank", sketch_max_rank,
-                   "Cap on the sketch component rank; 0 is uncapped")
-      ->default_val(sketch_max_rank)->check(CLI::NonNegativeNumber);
+                   "Maximum retained rank of the position sketch")
+      ->default_val(sketch_max_rank)->check(CLI::PositiveNumber);
 
-    app.add_option("--hess-gate-native-threshold",
-                   hess_gate_native_threshold,
-                   "Hessian Rayleigh-Ritz anisotropy above which the "
-                   "Hessian component is used; 0 disables the gate")
-      ->default_val(hess_gate_native_threshold)
-      ->check(CLI::NonNegativeNumber);
+    app.add_option("--curvature-max-rank", curvature_max_rank,
+                   "Maximum retained rank of the curvature component")
+      ->default_val(curvature_max_rank)->check(CLI::PositiveNumber);
 
-    app.add_flag("--gate-fail-open,!--gate-fail-closed",
-                 anisotropy_gate_fail_open,
-                 "Admit gated components until the first gate reading "
-                 "arrives, rather than withholding them")
-      ->default_val(anisotropy_gate_fail_open);
+    app.add_option("--sketch-eigenvalue-cutoff", sketch_eigenvalue_cutoff,
+                   "Retain standardized spectral values at least this large")
+      ->default_val(sketch_eigenvalue_cutoff)->check(CLI::PositiveNumber);
+
+    app.add_option("--sketch-residual-fraction", sketch_residual_fraction,
+                   "Fraction of position-sketch variance left in its residual")
+      ->default_val(sketch_residual_fraction)
+      ->check(CLI::Range(0.0, 1.0));
 
     app.add_option("--mixture-floor-diagonal", mixture_floor_diagonal,
                    "Structural floor on the diagonal component's weight")
       ->default_val(mixture_floor_diagonal);
+
+    app.add_option("--mixture-floor-position", mixture_floor_position,
+                   "Structural floor on the position-sketch weight")
+      ->default_val(mixture_floor_position);
+
+    app.add_option("--mixture-floor-curvature", mixture_floor_curvature,
+                   "Structural floor on the curvature-sketch weight")
+      ->default_val(mixture_floor_curvature);
 
     app.add_option("--bandit-shrink", bandit_shrink,
                    "Shrinkage of the mixture weights toward their prior when "
                    "rewards are uninformative")
       ->default_val(bandit_shrink)->check(CLI::NonNegativeNumber);
 
-    app.add_option("--mixture-prior-sketch", mixture_prior_sketch,
-                   "Log-odds prior for the SKETCH component")
-      ->default_val(mixture_prior_sketch);
+    app.add_option("--mixture-prior-position", mixture_prior_position,
+                   "Log-odds prior for the position-sketch component")
+      ->default_val(mixture_prior_position);
+
+    app.add_option("--mixture-prior-curvature", mixture_prior_curvature,
+                   "Log-odds prior for the curvature-sketch component")
+      ->default_val(mixture_prior_curvature);
 
     app.add_option("--terminal-buffer", terminal_buffer,
                    "Final warmup draws over which all adaptation is frozen")
       ->default_val(terminal_buffer)->check(CLI::NonNegativeNumber);
-
-    app.add_option("--hessian-oversample", hessian_oversample)
-      ->default_val(hessian_oversample)->check(CLI::NonNegativeNumber);
-    app.add_option("--hessian-cg-iterations", hessian_cg_iterations)
-      ->default_val(hessian_cg_iterations)->check(CLI::PositiveNumber);
-    app.add_option("--hessian-max-refreshes", hessian_max_refreshes)
-      ->default_val(hessian_max_refreshes)->check(CLI::NonNegativeNumber);
-
-    app.add_option("--hessian-factor-iterations", hessian_factor_iterations,
-                   "Factor-analysis iterations (0 reverts to the plug-in fit)")
-      ->default_val(hessian_factor_iterations)->check(CLI::NonNegativeNumber);
 
     app.add_option("--initial-transport-steps", initial_transport_steps,
                    "Initial nonstationary reflected-ray transport iterations")
@@ -299,17 +310,19 @@ int main(int argc, char** argv) {
     .sketch_columns = sketch_columns,
     .transport_J = transport_J,
     .mixture_direction = mixture_direction,
+    .position_sketch_direction = position_sketch_direction,
+    .curvature_sketch_direction = curvature_sketch_direction,
     .sketch_max_rank = sketch_max_rank,
-    .hess_gate_native_threshold = hess_gate_native_threshold,
-    .anisotropy_gate_fail_open = anisotropy_gate_fail_open,
+    .curvature_max_rank = curvature_max_rank,
+    .sketch_eigenvalue_cutoff = sketch_eigenvalue_cutoff,
+    .sketch_residual_fraction = sketch_residual_fraction,
     .mixture_floor_diagonal = mixture_floor_diagonal,
-    .mixture_prior_sketch = mixture_prior_sketch,
+    .mixture_floor_position = mixture_floor_position,
+    .mixture_floor_curvature = mixture_floor_curvature,
+    .mixture_prior_position = mixture_prior_position,
+    .mixture_prior_curvature = mixture_prior_curvature,
     .bandit_shrink = bandit_shrink,
     .terminal_buffer = terminal_buffer,
-    .hessian_oversample = hessian_oversample,
-    .hessian_cg_iterations = hessian_cg_iterations,
-    .hessian_max_refreshes = hessian_max_refreshes,
-    .hessian_factor_iterations = hessian_factor_iterations,
     .initial_transport_steps = initial_transport_steps,
     .transport_max_reflections = transport_max_reflections,
     .transport_initial_distance = transport_initial_distance,
@@ -394,28 +407,6 @@ int main(int argc, char** argv) {
     std::cout << "msjd: " << msjd.mean().transpose() << '\n';
     std::cout << "Number log_density evals: " << algo.nfev_ << '\n';
     std::cout << "Acceptance rate: " << algo.acceptance_rate_ << '\n';
-    if constexpr (requires { algo.hessian_attempts(); }) {
-      std::cout << "Hessian refresh success/attempts: "
-                << algo.hessian_successes() << "/"
-                << algo.hessian_attempts() << '\n';
-    }
-    if constexpr (requires { algo.hessian_failures(); }) {
-      const auto f = algo.hessian_failures();
-      std::cout << "Hessian failures:";
-      bool any = false;
-      for (int i = 0; i < klhr::BaseKLHR::kFailCount; ++i) {
-        if (f[i] > 0) {
-          std::cout << ' ' << klhr::BaseKLHR::hessian_failure_name(i)
-                    << '=' << f[i];
-          any = true;
-        }
-      }
-      if (!any) std::cout << " none";
-      std::cout << '\n';
-    }
-    if constexpr (requires { algo.hess_anisotropy(); }) {
-      std::cout << "Hess anisotropy: " << algo.hess_anisotropy() << '\n';
-    }
     if constexpr (requires { algo.metric_variance(); }) {
       const Eigen::VectorXd mv = algo.metric_variance();
       const Eigen::VectorXd tv = algo.transport_covariance();
@@ -426,24 +417,20 @@ int main(int argc, char** argv) {
         }
       }
     }
-    if constexpr (requires { algo.hess_gate_open(); }) {
-      std::cout << "Hess gate open: " << algo.hess_gate_open() << '\n';
-    }
-    if constexpr (requires { algo.sketch_persistence(); }) {
-      std::cout << "Sketch subspace persistence: "
-                << algo.sketch_persistence() << '\n';
-    }
-    if constexpr (requires { algo.sketch_rank(); }) {
-      std::cout << "COV beta used: " << algo.mixture_cov_beta_used()
-                << ", unclamped trace(BB')/trace(cov): "
-                << algo.cov_explained_raw() << '\n';
-      std::cout << "Sketch rank last/mean, dropouts: "
-                << algo.sketch_rank() << "/" << algo.sketch_mean_rank()
-                << ", " << algo.sketch_dropouts() << '\n';
+    if constexpr (requires { algo.sketch_ranks(); }) {
+      const auto rank = algo.sketch_ranks();
+      const auto mean_rank = algo.sketch_mean_ranks();
+      const auto dropouts = algo.sketch_dropouts();
+      std::cout << "Position sketch rank last/mean, dropouts: "
+                << rank[0] << "/" << mean_rank[0]
+                << ", " << dropouts[0] << '\n';
+      std::cout << "Curvature direction rank last/mean, dropouts: "
+                << rank[1] << "/" << mean_rank[1]
+                << ", " << dropouts[1] << '\n';
     }
     if constexpr (requires { algo.mixture_weights(); }) {
       const auto p = algo.mixture_weights();
-      std::cout << "Mixture weights diag/sketch/hess: "
+      std::cout << "Mixture weights diag/position/curvature: "
                 << p[0] << " " << p[1] << " " << p[2] << '\n';
     }
     if constexpr (requires { algo.overrelaxation_K(); }) {

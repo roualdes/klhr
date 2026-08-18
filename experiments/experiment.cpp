@@ -166,16 +166,48 @@ int main(int argc, char** argv) {
   if (cfg.contains("J")) {
     J = cfg.at("J").get<Eigen::Index>();
   }
+  Eigen::Index sketch_max_rank = klhr::KlhrOptions{}.sketch_max_rank;
+  if (cfg.contains("sketch_max_rank")) {
+    sketch_max_rank = cfg.at("sketch_max_rank").get<Eigen::Index>();
+  }
+  Eigen::Index curvature_max_rank =
+    klhr::KlhrOptions{}.curvature_max_rank;
+  if (cfg.contains("curvature_max_rank")) {
+    curvature_max_rank =
+      cfg.at("curvature_max_rank").get<Eigen::Index>();
+  }
   double target_accept = 0.8;
   if (cfg.contains("target_accept")) {
     target_accept = cfg.at("target_accept").get<double>();
   }
-
+  bool position_sketch_direction =
+    klhr::KlhrOptions{}.position_sketch_direction;
+  if (cfg.contains("position_sketch_direction")) {
+    position_sketch_direction =
+      cfg.at("position_sketch_direction").get<bool>();
+  }
+  bool curvature_sketch_direction =
+    klhr::KlhrOptions{}.curvature_sketch_direction;
+  if (cfg.contains("curvature_sketch_direction")) {
+    curvature_sketch_direction =
+      cfg.at("curvature_sketch_direction").get<bool>();
+  }
+  double sketch_residual_fraction =
+    klhr::KlhrOptions{}.sketch_residual_fraction;
+  if (cfg.contains("sketch_residual_fraction")) {
+    sketch_residual_fraction =
+      cfg.at("sketch_residual_fraction").get<double>();
+  }
   std::string model = std::format("./stan/{}_model.so", model_name);
   std::string data = std::format("./stan/{}.json", model_name);
   klhr::KlhrOptions klhr_options = {
     .warmup = warmup,
     .J = J,
+    .position_sketch_direction = position_sketch_direction,
+    .curvature_sketch_direction = curvature_sketch_direction,
+    .sketch_max_rank = sketch_max_rank,
+    .curvature_max_rank = curvature_max_rank,
+    .sketch_residual_fraction = sketch_residual_fraction,
   };
 
   auto run_sampler = [&](auto make_sampler) {
@@ -257,7 +289,25 @@ int main(int argc, char** argv) {
       if (!model_tbl.hasAttribute("J")) {
         model_tbl.createAttribute("J", J);
       }
-
+      if (!model_tbl.hasAttribute("sketch_max_rank")) {
+        model_tbl.createAttribute("sketch_max_rank", sketch_max_rank);
+      }
+      if (!model_tbl.hasAttribute("curvature_max_rank")) {
+        model_tbl.createAttribute(
+          "curvature_max_rank", curvature_max_rank);
+      }
+      if (!model_tbl.hasAttribute("position_sketch_direction")) {
+        model_tbl.createAttribute(
+          "position_sketch_direction", position_sketch_direction);
+      }
+      if (!model_tbl.hasAttribute("curvature_sketch_direction")) {
+        model_tbl.createAttribute(
+          "curvature_sketch_direction", curvature_sketch_direction);
+      }
+      if (!model_tbl.hasAttribute("sketch_residual_fraction")) {
+        model_tbl.createAttribute(
+          "sketch_residual_fraction", sketch_residual_fraction);
+      }
       std::string seed_tbl = std::format("{}/seed/{}", sampler, r);
       model_tbl.createDataSet(seed_tbl, std::to_string(algo.seed()));
 

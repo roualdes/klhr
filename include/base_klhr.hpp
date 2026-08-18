@@ -74,96 +74,36 @@ struct KlhrOptions {
   std::size_t lowrank_min_activations = 1;
   Eigen::Index sketch_columns = 60;
   Eigen::Index transport_J = 1;
-  // Draw the direction from a mixture of a diagonal, a sketched covariance
-  // and a trajectory-curvature component, with the weights adapted by a
-  // bandit. Replaces the single global choice of direction law: which law is
-  // best is target dependent, so the mixture settles it per run instead of
-  // per build.
-  //
-  // On by default: DIAG + COV + HESS with the native gate beats the
-  // diagonal-only sampler on five of six models, decisively where there is
-  // correlation to find (ar1 0.173x, corr-normal 0.114x RMSE-mean, the
-  // latter with 15.7x the mean squared jump of DIAG + COV alone). It pays
-  // ~3.5% on ill-normal and ~5% on normal, where a covariance component has
-  // nothing to find and the bandit can only shrink it toward its floor.
+  // Mix a diagonal direction with two spectral components. POSITION learns
+  // broad directions from draws. CURVATURE diagonalises BridgeStan's local
+  // negative log-density Hessian, so it can find a broad mode before the
+  // chain traverses it. Both feed the same trace-controlled direction law
+  // after learning their respective spectral pairs.
   bool mixture_direction = true;
-  // Cap on the sketch component's rank; 0 leaves the spectrum untruncated.
-  //
-  // The cap is load-bearing, which is the opposite of what the "a rank-J
-  // truncation is a lossy compression of something you already have exactly"
-  // argument predicts. That argument assumes the whole spectrum is estimable.
-  // At ESS/D around 0.26 it is not: the leading few directions are, the tail
-  // is noise, and sampling along the tail means proposing in directions the
-  // chain has not resolved. On corr-normal, uncapping cost ~25% in
-  // standardized RMSE (0.132 -> 0.170 unwhitened, 0.140 -> 0.166 whitened).
-  Eigen::Index sketch_max_rank = 20;
-  // Gate the Hessian component on its own Rayleigh-Ritz spectrum.
-  //
-  // Rayleigh-Ritz, concretely: the refresh already holds an orthonormal Q
-  // spanning the subspace its probes reached, and `small` = Q' Sigma_w Q is
-  // the whitened covariance restricted to that subspace. Its eigenvalues are
-  // the Ritz values -- the best estimates of Sigma_w's own eigenvalues
-  // obtainable from that subspace -- and the power iterations are what tilt Q
-  // toward the leading ones, so the top Ritz value tracks the true top
-  // eigenvalue closely while the rest of the spectrum is only sampled. The
-  // reading taken is the top Ritz value over the median one.
-  //
-  // That ratio gates because it is the question the component answers. A HESS
-  // draw proposes along the leading curvature directions at their own
-  // magnitudes, which beats the diagonal only if those directions really are
-  // much wider than typical. Whitening has already divided the diagonal out,
-  // so a ratio near one says the whitened covariance is near isotropic and
-  // there is no anisotropy left for a low-rank term to exploit -- the metric
-  // would be picking up noise.
-  //
-  // Two questions have to be answered about this component: can it be built,
-  // and is it worth building. CG failure already answers the first for free --
-  // a failed refresh leaves it out of live_components_ - but says nothing
-  // about the second: on ill-normal and normal CG succeeds 3/3 and the
-  // component is still harmful. The anisotropy of Q'Sigma_w Q answers the
-  // second, is computed inside the refresh at no cost, and separates the
-  // models where CG succeeds: ar1 9.8 and corr-normal 28.4 against ill-normal
-  // 2.7 and normal 2.2.
-  //
-  // It misreads funnel (55.0) and earnings (1.3), but those are exactly the
-  // models where CG fails anyway (0.7/8 and 1.0/8), so the capability gate
-  // already covers them.
-  //
-  // There is also no bootstrapping problem: the reading exists exactly when
-  // the component does, since both require a successful refresh.
-  //
-  // This replaced a gate on the whitened anisotropy of an (s, y) secant block,
-  // which was measured indistinguishable from it -- 0 of 18 cells resolved
-  // across six models and three metrics -- and cost a gradient evaluation per
-  // stride, 6.8% of the total on earnings. The secant machinery was deleted
-  // once nothing read it. "native" is retained in the name to keep it
-  // unambiguous against that older, differently-scaled threshold.
-  double hess_gate_native_threshold = 5.0;
-  // What to do before the first usable anisotropy reading arrives: true admits
-  // the gated component and withdraws it once the statistic disagrees, false
-  // withholds it until the statistic vouches for it. A reading exists from the
-  // first successful Hessian refresh onwards, so this governs only the windows
-  // before that -- and every window of a run where no refresh ever succeeds.
-  // Failing
-  // closed cost 17% on ar1 and 14% on corr-normal -- both resolved -- because
-  // the component sat out the early windows on targets where the gate ends
-  // open on every seed. The exposure the other way is bounded by what a
-  // useless component costs for those same few windows, and full exposure
-  // over a whole run is only ~7% (ill-normal 1.066, normal 1.087). So the
-  // asymmetry favours admitting the component and withdrawing it once there
-  // is evidence, rather than withholding it until there is.
-  bool anisotropy_gate_fail_open = true;
+  bool position_sketch_direction = true;
+  bool curvature_sketch_direction = true;
+  // Position and curvature have separate caps because the number of broad
+  // local-curvature modes need not match the estimable covariance rank.
+  Eigen::Index sketch_max_rank = 10;
+  Eigen::Index curvature_max_rank = 10;
+  // Retain only standardized position-covariance or inverse-curvature
+  // eigenvalues whose scale is at least this far above the diagonal baseline.
+  double sketch_eigenvalue_cutoff = 2.0;
+  // Fraction of a sketch law's total standardized variance left in its
+  // full-rank isotropic residual. The remaining trace is assigned to the
+  // retained subspace, independent of ambient dimension.
+  double sketch_residual_fraction = 0.02;
   // Mixture floors. The diagonal floor is structural, and deliberately not
   // small: on a target with no correlation to find (ill-normal) the diagonal
   // is the correct answer, standardized ESJD is exactly flat so the bandit
   // gets no gradient, and the floor is what keeps a useless component from
   // holding weight indefinitely.
   double mixture_floor_diagonal = 0.25;
-  double mixture_floor_sketch = 0.02;
-  double mixture_floor_hess = 0.02;
+  double mixture_floor_position = 0.02;
+  double mixture_floor_curvature = 0.02;
   // Log-odds prior the weights relax toward when rewards are uninformative.
-  double mixture_prior_sketch = -1.0;
-  double mixture_prior_hess = -1.0;
+  double mixture_prior_position = -1.0;
+  double mixture_prior_curvature = -1.0;
   double bandit_gamma0 = 0.5;
   double bandit_decay = 0.6;
   // Pull toward the prior. At 0.1 the cumulative pull over a run was about
@@ -179,12 +119,6 @@ struct KlhrOptions {
   // actually sample. Without it the last metric change lands on the final
   // warmup draw.
   std::size_t terminal_buffer = 50;
-  Eigen::Index hessian_oversample = 10;
-  std::size_t hessian_power_iterations = 2;
-  std::size_t hessian_cg_iterations = 30;
-  std::size_t hessian_max_refreshes = 3;
-  std::size_t hessian_factor_iterations = 5;
-  double hessian_step = 1e-4;
   double transport_cov_shrink = 0.25;
   double transport_cov_ratio_cap = 4.0;
   double l = 0.0;
@@ -214,36 +148,12 @@ struct KlhrOptions {
 class BaseKLHR {
 public:
   static constexpr int kDiag = 0;
-  static constexpr int kSketch = 1;
-  static constexpr int kHess = 2;
+  static constexpr int kPosition = 1;
+  static constexpr int kCurvature = 2;
   static constexpr int kComponents = 3;
   // The direction that was actually used came from no component's law, so no
   // component may be credited or charged for how it performed.
   static constexpr int kUnattributed = -1;
-
-  // Why a Hessian refresh gave up. Fifteen distinct abort paths made it
-  // impossible to tell whether the failures that cost HESS the earnings
-  // comparison were indefinite curvature in conjugate gradients or
-  // something else entirely.
-  //
-  // Diagnostic only -- nothing in the sampler branches on them; examples/
-  // example.cpp reads them out through hessian_failures(). Keep them: the
-  // cg_probe counter is what localised the conjugate-gradient breakdown that
-  // was aborting every refresh on a low-dimensional target, and no aggregate
-  // success rate could have told those apart.
-  static constexpr int kFail_gated = 0;
-  static constexpr int kFail_reference = 1;
-  static constexpr int kFail_subspace = 2;
-  static constexpr int kFail_cg_probe = 3;
-  static constexpr int kFail_diag_ratio = 4;
-  static constexpr int kFail_cg_sketch = 5;
-  static constexpr int kFail_cg_power = 6;
-  static constexpr int kFail_cg_final = 7;
-  static constexpr int kFail_eigensolver = 8;
-  static constexpr int kFail_factor_nonfinite = 9;
-  static constexpr int kFail_degenerate_dir = 10;
-  static constexpr int kFail_basis_nonfinite = 11;
-  static constexpr int kFailCount = 12;
 
   std::size_t nfev_;
   double acceptance_rate_;
@@ -267,9 +177,12 @@ public:
     online_moments_(bsm_.dim()),
     K_online_moments_(bsm_.dim()),
     online_pca_(bsm_.dim(), opts_.J, opts_.l, opts_.tol),
-    sketch_(bsm_.dim(),
-            opts_.mixture_direction ? opts_.sketch_columns : 0,
-            opts_.tol, opts_.seed ^ 0x5bf03635U),
+    position_sketch_(bsm_.dim(),
+                     opts_.mixture_direction &&
+                       opts_.position_sketch_direction ?
+                         opts_.sketch_columns : 0,
+                     opts_.tol, opts_.seed ^ 0x5bf03635U),
+    curvature_direction_(bsm_.dim(), opts_.tol),
     projected_moments_(opts_.J) {
 
     if (opts_.seed == 0) {
@@ -301,7 +214,6 @@ public:
     Eigen::VectorXd initial_grad = Eigen::VectorXd::Zero(dim());
     bsm_.log_density_gradient_noe(theta_, log_density_, initial_grad);
     ++nfev_;
-
     initialize_K_window_metric_(false);
 
     transport_.initialize({theta_, initial_grad, log_density_, true},
@@ -326,56 +238,24 @@ public:
   Eigen::VectorXd metric_variance() const { return diagonal_variance_(); }
   Eigen::VectorXd transport_covariance() const { return transport_cov_; }
 
-  bool hess_gate_open() const { return hess_gate_open_(); }
-  // Two candidate gate signals native to the Hessian refresh, both available
-  // from the first refresh onwards.
-  double hess_anisotropy() const {
-    return hess_signal_count_ == 0 ? 0.0 :
-      hess_anisotropy_total_ / static_cast<double>(hess_signal_count_);
+  // Diagnostics are paired in component order: POSITION, CURVATURE.
+  std::array<Eigen::Index, 2> sketch_ranks() const {
+    return {position_sketch_.rank(), curvature_direction_.rank()};
   }
-  // Mean overlap between consecutive windows' sketch subspaces: 1 means the
-  // same directions every time, rank/D means freshly random.
-  double sketch_persistence() const {
-    return sketch_persistence_count_ == 0 ? 0.0 :
-      sketch_persistence_total_ / static_cast<double>(sketch_persistence_count_);
+  std::array<double, 2> sketch_mean_ranks() const {
+    return {position_sketch_.mean_rank(), curvature_direction_.mean_rank()};
+  }
+  std::array<std::size_t, 2> sketch_dropouts() const {
+    return {position_sketch_.dropouts(), curvature_direction_.dropouts()};
   }
 
-  double mixture_cov_beta_used() const { return mixture_cov_beta_used_; }
-  double cov_explained_raw() const { return cov_explained_raw_; }
-  Eigen::Index sketch_rank() const { return sketch_rank_; }
-  std::size_t sketch_dropouts() const { return sketch_dropouts_; }
-  double sketch_mean_rank() const {
-    return sketch_rebuilds_ == 0 ? 0.0 :
-      static_cast<double>(sketch_rank_total_) /
-      static_cast<double>(sketch_rebuilds_);
-  }
-
-  std::array<std::size_t, kFailCount> hessian_failures() const {
-    return hess_fail_;
-  }
-
-  // Diagnostic, and live: examples/example.cpp labels the hessian_failures()
-  // histogram with it. Both are behind `requires` checks there, so dropping
-  // either silently deletes the output rather than failing the build.
-  static const char* hessian_failure_name(const int i) {
-    static const char* names[kFailCount] = {"gated", "reference", "subspace", "cg_probe", "diag_ratio", "cg_sketch", "cg_power", "cg_final", "eigensolver", "factor_nonfinite", "degenerate_dir", "basis_nonfinite"};
-    return (i >= 0 && i < kFailCount) ? names[i] : "?";
-  }
-
-
-  std::size_t hessian_attempts() const { return hessian_attempts_; }
-  std::size_t hessian_successes() const { return hessian_refreshes_; }
-
-
-  // Final mixture weights, in component order: DIAG, SKETCH, HESS.
+  // Final mixture weights, in component order: DIAG, POSITION, CURVATURE.
   //
   // To judge whether the mixture is worth its cost, read a weight against the
   // floor it cannot go below (mixture_floor_*) and against the prior it decays
   // to when rewards are uninformative (mixture_prior_*). A component parked at
-  // its floor was tried and rejected by the bandit; a component at zero never
-  // became live at all, which hessian_successes() and sketch_dropouts()
-  // separate. The two call for opposite responses and no end-to-end error
-  // metric distinguishes them.
+  // its floor was tried and rejected by the bandit; a component at zero did
+  // not find a spectral mode beyond the configured cutoff.
   //
   // A weight well above its prior is the bandit reporting a real per-coordinate
   // ESJD gain, but that is its own objective, not the run's -- confirm it
@@ -405,12 +285,13 @@ public:
 
     const std::size_t K_draw = post_transport_warmup_draw(
       draw_, opts_.warmup, opts_.initial_transport_steps);
-    if (adapting_(K_draw) && K_adaptation_.enabled()) {
+    const bool adapting = adapting_(K_draw);
+    if (adapting && K_adaptation_.enabled()) {
       opts_.K = K_adaptation_.K();
     }
     Eigen::VectorXd rho = random_direction();
     const KlStepDiagnostics diagnostics = kl_step_(rho);
-    if (adapting_(K_draw)) {
+    if (adapting) {
       bandit_observe_(rho, diagnostics);
       if (K_adaptation_.enabled()) {
         adapt_K_warmup_(rho, diagnostics);
@@ -476,7 +357,7 @@ protected:
   struct LineModeEstimate {
     double mode = 0.0;
     double log_scale = 0.0;
-    bool hessian_usable = false;
+    bool curvature_usable = false;
     bool success = false;
   };
 
@@ -499,14 +380,14 @@ protected:
     if (mode.x.size() == 1 && std::isfinite(mode.x(0))) {
       out.mode = mode.x(0);
     }
-    double inverse_hessian = std::numeric_limits<double>::quiet_NaN();
+    double inverse_curvature = std::numeric_limits<double>::quiet_NaN();
     if (mode.hess_inv.rows() == 1 && mode.hess_inv.cols() == 1) {
-      inverse_hessian = mode.hess_inv(0, 0);
+      inverse_curvature = mode.hess_inv(0, 0);
     }
-    out.hessian_usable =
-      std::isfinite(inverse_hessian) && inverse_hessian > 0.0;
-    if (out.hessian_usable) {
-      out.log_scale = 0.5 * std::log(inverse_hessian);
+    out.curvature_usable =
+      std::isfinite(inverse_curvature) && inverse_curvature > 0.0;
+    if (out.curvature_usable) {
+      out.log_scale = 0.5 * std::log(inverse_curvature);
     }
     out.success = mode.success;
     return out;
@@ -536,7 +417,7 @@ protected:
       evaluate_kl(eta, mode.log_scale, value, grad);
     };
 
-    if (!mode.success || !mode.hessian_usable) {
+    if (!mode.success || !mode.curvature_usable) {
       bfgs::BfgsResult fit = bfgs::bfgs(kl, init, bfgs_options_());
       nfev_ += fit.nfev * opts_.N;
       const Eigen::VectorXd raw =
@@ -651,6 +532,21 @@ protected:
     options.sketch_columns = std::clamp(options.sketch_columns,
                                         Eigen::Index{1},
                                         std::max<Eigen::Index>(D, 1));
+    options.sketch_max_rank = std::clamp(options.sketch_max_rank,
+                                         Eigen::Index{1},
+                                         std::max<Eigen::Index>(D, 1));
+    options.curvature_max_rank = std::clamp(options.curvature_max_rank,
+                                            Eigen::Index{1},
+                                            std::max<Eigen::Index>(D, 1));
+    options.sketch_eigenvalue_cutoff =
+      std::isfinite(options.sketch_eigenvalue_cutoff) &&
+      options.sketch_eigenvalue_cutoff > 1.0 ?
+        options.sketch_eigenvalue_cutoff : 2.0;
+    options.sketch_residual_fraction =
+      std::isfinite(options.sketch_residual_fraction) ?
+        std::clamp(options.sketch_residual_fraction,
+                   std::max(options.tol, 1e-12), 1.0) :
+        KlhrOptions{}.sketch_residual_fraction;
     options.direction_lowrank_weight =
       std::isfinite(options.direction_lowrank_weight) ?
       std::clamp(options.direction_lowrank_weight, 0.0, 1.0) : 1.0;
@@ -744,7 +640,8 @@ protected:
   mcmcpp::WelfordAccumulator online_moments_;
   mcmcpp::WelfordAccumulator K_online_moments_;
   OnlinePCA online_pca_;
-  Sketch sketch_;
+  PositionSketch position_sketch_;
+  CurvatureDirection curvature_direction_;
   mcmcpp::WelfordAccumulator projected_moments_;
 
   Eigen::VectorXd theta_;
@@ -759,22 +656,8 @@ protected:
   Eigen::MatrixXd eigvecs_;
   Eigen::VectorXd eigvals_;
   Eigen::MatrixXd projection_basis_;
-  std::array<std::size_t, kFailCount> hess_fail_{};
   Eigen::VectorXd transport_cov_;
-  Eigen::MatrixXd sketch_prev_basis_;
-  double sketch_persistence_total_ = 0.0;
-  std::size_t sketch_persistence_count_ = 0;
-  std::size_t hessian_refreshes_ = 0;
-  std::size_t hessian_attempts_ = 0;
   // Mixture direction law and its bandit.
-  Eigen::MatrixXd mixture_sketch_basis_;
-  double mixture_cov_beta_used_ = 0.0;
-  double cov_explained_raw_ = 0.0;
-  Eigen::MatrixXd mixture_sketch_scaled_;
-  Eigen::VectorXd mixture_sketch_residual_;
-  Eigen::MatrixXd mixture_hess_basis_;
-  bool mixture_hess_ready_ = false;
-  bool mixture_sketch_ready_ = false;
   // Initialised to the prior by reset_mixture_(), which the constructor runs.
   std::array<double, kComponents> mixture_logw_{{0.0, 0.0, 0.0}};
   std::array<double, kComponents> mixture_p_{{1.0, 0.0, 0.0}};
@@ -785,15 +668,6 @@ protected:
   std::map<std::size_t, BanditBlock> blocks_;
   std::size_t bandit_updates_ = 0;
   int last_component_ = 0;
-  // The mean the sketch is currently centering on; the window mean moves
-  // away from it, and recenter() removes the resulting bias.
-  Eigen::VectorXd sketch_center_;
-  Eigen::Index sketch_rank_ = 0;
-  std::size_t sketch_rebuilds_ = 0;
-  std::size_t sketch_rank_total_ = 0;
-  std::size_t sketch_dropouts_ = 0;
-  double hess_anisotropy_total_ = 0.0;
-  std::size_t hess_signal_count_ = 0;
 
   bool projection_basis_ready_ = false;
   bool pca_frozen_ = false;
@@ -1009,9 +883,6 @@ protected:
     eigvecs_ = Eigen::MatrixXd::Zero(D, opts_.J);
     eigvals_ = Eigen::VectorXd::Ones(opts_.J);
     projection_basis_ = Eigen::MatrixXd::Zero(D, opts_.J);
-    hessian_refreshes_ = 0;
-    hess_anisotropy_total_ = 0.0;
-    hess_signal_count_ = 0;
 
     online_moments_.reset();
     reset_basis_estimator_();
@@ -1047,339 +918,6 @@ protected:
     return diagonal_variance_().array().sqrt().matrix();
   }
 
-  // Whitened Hessian applied to each column of V: scale .* (H (scale .* v)),
-  // by central differencing of gradients. Two gradient evaluations per
-  // column. Working whitened keeps the step dimensionless, which matters on
-  // a posterior whose coordinates differ by orders of magnitude.
-  bool whitened_hessian_apply_(const Eigen::VectorXd& reference,
-                               const Eigen::VectorXd& scale,
-                               const Eigen::MatrixXd& V,
-                               Eigen::MatrixXd& out) {
-    const double h = opts_.hessian_step;
-    out.resize(V.rows(), V.cols());
-    Eigen::VectorXd forward(dim());
-    Eigen::VectorXd backward(dim());
-    double value = 0.0;
-    for (Eigen::Index j = 0; j < V.cols(); ++j) {
-      const Eigen::VectorXd delta =
-        h * (scale.array() * V.col(j).array()).matrix();
-      bsm_.log_density_gradient_noe(reference + delta, value, forward);
-      bsm_.log_density_gradient_noe(reference - delta, value, backward);
-      nfev_ += 2;
-      if (!forward.allFinite() || !backward.allFinite()) {
-        return false;
-      }
-      // f = -log pi, so H v = -(grad log pi(+) - grad log pi(-)) / (2h).
-      out.col(j) = (scale.array() *
-                    (backward - forward).array() / (2.0 * h)).matrix();
-    }
-    return out.allFinite();
-  }
-
-  // Conjugate gradients on the whitened Hessian: returns Sigma_w B.
-  // relative_residual, when given, receives the mean over columns of
-  // ||r_j||^2 / ||b_j||^2 at the last iterate. This is the residual conjugate
-  // gradients maintains recursively, which is what it costs nothing to report,
-  // and it is the only visibility we have into whether hessian_cg_iterations
-  // is enough on a given target.
-  bool whitened_covariance_apply_(const Eigen::VectorXd& reference,
-                                  const Eigen::VectorXd& scale,
-                                  const Eigen::MatrixXd& B,
-                                  Eigen::MatrixXd& X,
-                                  double* relative_residual = nullptr) {
-    X = Eigen::MatrixXd::Zero(B.rows(), B.cols());
-    Eigen::MatrixXd R = B;
-    Eigen::MatrixXd P = R;
-    Eigen::MatrixXd AP;
-    const Eigen::ArrayXd rs0 = B.colwise().squaredNorm().array();
-    // Retire a column once its residual has collapsed relative to where it
-    // started -- 1e-16 in squared norm, so 1e-8 in norm, the conventional
-    // conjugate-gradient stopping point.
-    //
-    // Without this the solve cannot succeed on a low-dimensional target.
-    // Conjugate gradients terminates in at most D steps, and past that P is
-    // numerically zero: whitened_hessian_apply_ forms reference +/- h*scale*P,
-    // which rounds back to reference exactly, so p'Ap comes back as zero or as
-    // sign-random rounding noise and the indefiniteness test below reads it as
-    // a failed refresh. Every D <= hessian_cg_iterations target aborts, which
-    // is what left funnel and earnings with almost no successful refreshes.
-    // Where nothing retires -- D well above hessian_cg_iterations -- the
-    // arithmetic below is unchanged coefficient for coefficient.
-    const Eigen::ArrayXd converged = rs0 * 1e-16;
-    Eigen::ArrayXd active = Eigen::ArrayXd::Ones(B.cols());
-    Eigen::ArrayXd rs = rs0;
-    for (std::size_t iteration = 0;
-         iteration < opts_.hessian_cg_iterations; ++iteration) {
-      for (Eigen::Index j = 0; j < B.cols(); ++j) {
-        if (active(j) > 0.0 && rs(j) <= converged(j)) {
-          active(j) = 0.0;
-          P.col(j).setZero();
-          R.col(j).setZero();
-        }
-      }
-      if ((active <= 0.0).all()) {
-        break;
-      }
-      if (!whitened_hessian_apply_(reference, scale, P, AP)) {
-        return false;
-      }
-      const Eigen::ArrayXd pap =
-        (P.array() * AP.array()).colwise().sum().transpose();
-      // A non-positive curvature means the operator is indefinite along this
-      // search direction, so conjugate gradients cannot proceed. Declining is
-      // the intended outcome. Retired columns carry p'Ap == 0 by construction,
-      // so they are exempt.
-      if (!pap.allFinite() || ((active > 0.0) && (pap <= 0.0)).any()) {
-        return false;
-      }
-      // 1 - active keeps a retired column's 0/0 out of alpha. It multiplies a
-      // zero P and a zero AP, so only finiteness matters.
-      const Eigen::ArrayXd alpha = active * rs / (pap + (1.0 - active));
-      X += P * alpha.matrix().asDiagonal();
-      R -= AP * alpha.matrix().asDiagonal();
-      const Eigen::ArrayXd rs_next = R.colwise().squaredNorm().array();
-      const Eigen::ArrayXd beta = active * rs_next / rs.max(opts_.tol);
-      P = R + P * beta.matrix().asDiagonal();
-      rs = rs_next;
-    }
-    if (relative_residual != nullptr) {
-      const Eigen::ArrayXd scale2 =
-        B.colwise().squaredNorm().array().max(opts_.tol);
-      const double mean = (rs / scale2).mean();
-      *relative_residual = std::isfinite(mean) ? mean : 0.0;
-    }
-    return X.allFinite();
-  }
-
-  // A J-factor model on D variables has D + D*J - J(J-1)/2 free parameters
-  // against the D(D+1)/2 distinct entries of Sigma, so it is only
-  // identifiable while (D-J)^2 >= D+J. Beyond that the fit is chasing more
-  // parameters than the data can pin down; the plug-in eigendecomposition is
-  // the right estimator there, and at J = D it reconstructs Sigma exactly.
-  //
-  // The closed form is the Ledermann bound (Ledermann 1937; see also Anderson
-  // and Rubin 1956). Requiring free parameters not to exceed distinct entries,
-  //
-  //   D + DJ - J(J-1)/2  <=  D(D+1)/2   <=>   (D-J)^2 >= D + J
-  //                                     <=>   J^2 - (2D+1)J + D^2 - D >= 0,
-  //
-  // and the smaller root of that quadratic is
-  //
-  //   J <= [ (2D+1) - sqrt((2D+1)^2 - 4(D^2-D)) ] / 2
-  //      = [ 2D + 1 - sqrt(8D + 1) ] / 2,
-  //
-  // which is what is returned, floored to an index. It is a necessary
-  // condition on the parameter count, not a sufficient one for any particular
-  // Sigma, so treat it as a ceiling rather than a guarantee.
-  static Eigen::Index ledermann_bound_(const Eigen::Index D) {
-    if (D <= 1) {
-      return 0;
-    }
-    const double d = static_cast<double>(D);
-    const double bound = 0.5 * (2.0 * d + 1.0 - std::sqrt(8.0 * d + 1.0));
-    return std::max<Eigen::Index>(0, static_cast<Eigen::Index>(bound));
-  }
-
-  bool hessian_enabled_() const {
-    return opts_.mixture_direction;
-  }
-
-  bool refresh_hessian_metric_() {
-    if (!hessian_enabled_() || opts_.J <= 0 ||
-        hessian_refreshes_ >= opts_.hessian_max_refreshes) {
-      ++hess_fail_[kFail_gated];
-      return false;
-    }
-    ++hessian_attempts_;
-    return refresh_hessian_metric_attempt_();
-  }
-
-  // Only ever reached through refresh_hessian_metric_, which has already
-  // charged the attempt and cleared the capability gate.
-  bool refresh_hessian_metric_attempt_() {
-    const Eigen::Index J = opts_.J;
-    const Eigen::Index D = dim();
-    const Eigen::VectorXd reference =
-      (mean_.size() == D && mean_.allFinite()) ? mean_ : theta_;
-    if (!reference.allFinite()) {
-      ++hess_fail_[kFail_reference];
-      return false;
-    }
-    const Eigen::VectorXd scale = metric_scale_();
-    const Eigen::Index m = std::min(D, J + std::max<Eigen::Index>(
-      0, opts_.hessian_oversample));
-    if (m < J) {
-      ++hess_fail_[kFail_subspace];
-      return false;
-    }
-
-    const bool exact_diagonal = (m == D);
-    Eigen::MatrixXd probe(D, m);
-    if (exact_diagonal) {
-      probe.setIdentity();
-    } else {
-      for (Eigen::Index j = 0; j < m; ++j) {
-        probe.col(j) = normal_rng_(D);
-      }
-    }
-    Eigen::MatrixXd probe_image;
-    if (!whitened_covariance_apply_(reference, scale, probe, probe_image)) {
-      ++hess_fail_[kFail_cg_probe];
-      return false;
-    }
-    Eigen::VectorXd diagonal_ratio(D);
-    if (exact_diagonal) {
-      diagonal_ratio = probe_image.diagonal();
-    } else {
-      diagonal_ratio =
-        (probe.array() * probe_image.array()).rowwise().mean();
-    }
-    if (!diagonal_ratio.allFinite()) {
-      ++hess_fail_[kFail_diag_ratio];
-      return false;
-    }
-    const Eigen::VectorXd psi_base = diagonal_ratio.cwiseMax(opts_.tol);
-
-    Eigen::MatrixXd Y(D, m);
-    for (Eigen::Index j = 0; j < m; ++j) {
-      Y.col(j) = normal_rng_(D);
-    }
-    Eigen::MatrixXd sketch;
-    if (!whitened_covariance_apply_(reference, scale, Y, sketch)) {
-      ++hess_fail_[kFail_cg_sketch];
-      return false;
-    }
-    for (std::size_t p = 0; p < opts_.hessian_power_iterations; ++p) {
-      const Eigen::MatrixXd Q =
-        Eigen::HouseholderQR<Eigen::MatrixXd>(sketch)
-          .householderQ() * Eigen::MatrixXd::Identity(D, m);
-      if (!whitened_covariance_apply_(reference, scale, Q, sketch)) {
-        ++hess_fail_[kFail_cg_power];
-        return false;
-      }
-    }
-    const Eigen::MatrixXd Q =
-      Eigen::HouseholderQR<Eigen::MatrixXd>(sketch)
-        .householderQ() * Eigen::MatrixXd::Identity(D, m);
-    Eigen::MatrixXd SQ;
-    if (!whitened_covariance_apply_(reference, scale, Q, SQ)) {
-      ++hess_fail_[kFail_cg_final];
-      return false;
-    }
-
-    Eigen::MatrixXd small = Q.transpose() * SQ;
-    small = 0.5 * (small + small.transpose()).eval();
-
-    // Q' Sigma_w Q is the whitened covariance restricted to the sampled
-    // subspace, from deliberate probes with power iterations. Recorded here
-    // because it is available at the first successful refresh, which is
-    // exactly when the Hessian component first becomes usable, so the gate
-    // can never delay the component it governs.
-    {
-      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> spectrum(small);
-      if (spectrum.info() == Eigen::Success) {
-        const Eigen::VectorXd& sv = spectrum.eigenvalues();
-        const double median = sv(m / 2);
-        if (std::isfinite(median) && median > opts_.tol) {
-          hess_anisotropy_total_ += sv(m - 1) / median;
-          ++hess_signal_count_;
-        }
-      }
-    }
-
-    // Factor analysis, fitted inside the sampled subspace: alternate the
-    // loadings against the residual diagonal.
-    //
-    //   Sigma_w  ~  diag(psi) + V L V',   psi = 1 - diag(V L V')
-    //
-    // Plugging in the top eigenpairs of Sigma_w instead -- which is what
-    // this did, and what the covariance path still does -- installs a
-    // rank-J term whether or not there is any correlation to model. On an
-    // exactly diagonal target Sigma_w is the identity, every eigenvalue is
-    // one, the leading direction is arbitrary noise, and the metric picks
-    // up a spurious off-diagonal worth roughly a factor of two in
-    // cond(M^-1 Sigma). Fitting returns zero loadings there and the metric
-    // collapses to the diagonal, which is the correct answer.
-    //
-    // Reusing Q costs nothing: the leading eigenvectors of Sigma_w - psi
-    // are close to those of Sigma_w when psi is near isotropic, so no
-    // further conjugate-gradient solves are needed.
-    // Zero iterations reproduces the old plug-in exactly: psi stays zero, so
-    // the single pass diagonalises Sigma_w itself.
-    // Fit factors only where a factor model is identifiable; otherwise take
-    // the plug-in eigendecomposition, which is exact once the subspace spans
-    // the problem. On the four-parameter models the bound is one factor, and
-    // fitting four cost earnings a factor of thirty in min-ESS.
-    const bool fit_factors =
-      opts_.hessian_factor_iterations > 0 && J <= ledermann_bound_(D);
-    const std::size_t passes =
-      std::max<std::size_t>(1, opts_.hessian_factor_iterations);
-    Eigen::VectorXd psi = Eigen::VectorXd::Zero(D);
-    if (fit_factors) {
-      psi = psi_base;
-    }
-    Eigen::MatrixXd whitened_basis = Eigen::MatrixXd::Zero(D, J);
-    Eigen::VectorXd loadings = Eigen::VectorXd::Zero(J);
-    for (std::size_t iteration = 0; iteration < passes; ++iteration) {
-      Eigen::MatrixXd projected = small;
-      projected.noalias() -= Q.transpose() * psi.asDiagonal() * Q;
-      projected = (0.5 * (projected + projected.transpose())).eval();
-      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(projected);
-      if (solver.info() != Eigen::Success) {
-        ++hess_fail_[kFail_eigensolver];
-        return false;
-      }
-      for (Eigen::Index j = 0; j < J; ++j) {
-        const Eigen::Index source = m - 1 - j;  // eigenvalues ascend
-        // A negative loading would mean the direction is narrower than the
-        // diagonal already says, which this model cannot represent.
-        loadings(j) = std::max(solver.eigenvalues()(source), 0.0);
-        whitened_basis.col(j) = Q * solver.eigenvectors().col(source);
-      }
-      if (fit_factors) {
-        psi = psi_base -
-          (whitened_basis.array().square().matrix() * loadings);
-        psi = psi.cwiseMax(opts_.tol);
-      }
-      if (!psi.allFinite() || !loadings.allFinite()) {
-        ++hess_fail_[kFail_factor_nonfinite];
-        return false;
-      }
-    }
-
-    Eigen::MatrixXd basis(D, J);
-    Eigen::VectorXd weights(J);
-    for (Eigen::Index j = 0; j < J; ++j) {
-      // Sigma = diag(scale) Sigma_w diag(scale), so a whitened direction v
-      // with loading l contributes l * (scale .* v)(scale .* v)'.
-      const Eigen::VectorXd mapped =
-        (scale.array() * whitened_basis.col(j).array()).matrix();
-      const double norm = mapped.norm();
-      if (!std::isfinite(norm) || norm <= opts_.tol) {
-        // Only fatal if this direction was carrying a loading.
-        if (loadings(j) > 0.0) {
-          ++hess_fail_[kFail_degenerate_dir];
-          return false;
-        }
-        basis.col(j) = Eigen::VectorXd::Unit(D, std::min<Eigen::Index>(j, D - 1));
-        weights(j) = 0.0;
-        continue;
-      }
-      basis.col(j) = mapped / norm;
-      weights(j) = loadings(j) * norm * norm;
-    }
-    if (!basis.allFinite() || !weights.allFinite()) {
-      ++hess_fail_[kFail_basis_nonfinite];
-      return false;
-    }
-
-    eigvecs_.leftCols(J) = basis;
-    eigvals_.head(J) = weights.cwiseMax(opts_.tol);
-    lowrank_ready_ = true;
-    ++hessian_refreshes_;
-    return true;
-  }
-
   static std::size_t adaptation_span_of_(const std::size_t steps,
                                          const std::size_t terminal) {
     // The buffer must never swallow the whole adaptation.
@@ -1394,14 +932,14 @@ protected:
   }
 
   double mixture_floor_(const int c) const {
-    if (c == kSketch) return opts_.mixture_floor_sketch;
-    if (c == kHess) return opts_.mixture_floor_hess;
+    if (c == kPosition) return opts_.mixture_floor_position;
+    if (c == kCurvature) return opts_.mixture_floor_curvature;
     return opts_.mixture_floor_diagonal;
   }
 
   double mixture_prior_(const int c) const {
-    if (c == kSketch) return opts_.mixture_prior_sketch;
-    if (c == kHess) return opts_.mixture_prior_hess;
+    if (c == kPosition) return opts_.mixture_prior_position;
+    if (c == kCurvature) return opts_.mixture_prior_curvature;
     return 0.0;
   }
 
@@ -1409,8 +947,8 @@ protected:
   // data, which gives the "do not use an unestimated basis" gate for free.
   std::vector<int> live_components_() const {
     std::vector<int> live{kDiag};
-    if (mixture_sketch_ready_) live.push_back(kSketch);
-    if (mixture_hess_ready_) live.push_back(kHess);
+    if (position_sketch_.ready()) live.push_back(kPosition);
+    if (curvature_direction_.ready()) live.push_back(kCurvature);
     return live;
   }
 
@@ -1443,8 +981,7 @@ protected:
   }
 
   // nu is symmetric and does not depend on theta, so nu(d)/nu(-d) is one and
-  // the direction never enters the Hastings ratio -- which is what makes the
-  // singular components legal despite having no Lebesgue density.
+  // the direction never enters the Hastings ratio.
   Eigen::VectorXd mixture_direction_noise_() {
     const double u = std_uniform_(rng_);
     double cumulative = 0.0;
@@ -1457,19 +994,13 @@ protected:
       }
     }
 
-    if (chosen == kSketch && mixture_sketch_ready_) {
-      last_component_ = kSketch;
-      if (mixture_sketch_residual_.size() == dim()) {
-        return scaled_additive_draw_(mixture_sketch_scaled_,
-                                     mixture_sketch_residual_);
-      }
-      return mixture_sketch_basis_ *
-        normal_rng_(mixture_sketch_basis_.cols());
+    if (chosen == kPosition && position_sketch_.ready()) {
+      last_component_ = kPosition;
+      return position_direction_noise_();
     }
-    if (chosen == kHess && mixture_hess_ready_) {
-      last_component_ = kHess;
-      // Pure low-rank, at the curvature's own magnitudes.
-      return mixture_hess_basis_ * normal_rng_(mixture_hess_basis_.cols());
+    if (chosen == kCurvature && curvature_direction_.ready()) {
+      last_component_ = kCurvature;
+      return curvature_direction_noise_();
     }
     last_component_ = kDiag;
     return diagonal_direction_noise_();
@@ -1560,20 +1091,9 @@ protected:
         continue;
       }
 
-      // The old claim here -- that only DIAG moves every coordinate almost
-      // surely -- is wrong, and SKETCH is the counterexample: whenever
-      // build_scaled_component_ succeeds, mixture_direction_noise_ takes the
-      // scaled_additive_draw_ branch, which adds a full-rank residual term and
-      // so moves every coordinate too. HESS is the only genuinely singular
-      // component; it draws inside a J-dimensional subspace and leaves the
-      // complement exactly untouched.
-      //
-      // So the floor that keeps every E_d positive is DIAG's *or* SKETCH's,
-      // whichever is live -- and SKETCH is not always live. The guard below
-      // therefore still earns its place: it covers the case where the sketch
-      // has dropped out and HESS holds weight, and any coordinate no live
-      // component happened to move within the block.
-      // Guard against a coordinate no component happened to touch.
+      // The diagonal law makes the mixture full rank. Keep a numerical floor
+      // for finite-sample blocks in which a coordinate happened to receive no
+      // measurable jump.
       const double floor = std::max(opts_.tol, 1e-12 * mixed.maxCoeff());
       const Eigen::ArrayXd E = mixed.array().max(floor);
       const Eigen::ArrayXd inv = 1.0 / E;
@@ -1622,168 +1142,61 @@ protected:
     if (!opts_.mixture_direction) {
       return;
     }
-
-    // mean_ was updated at this window close, but the sketch accumulated
-    // against the previous one; remove that bias before anything reads it.
-    if (sketch_center_.size() == dim() && mean_.size() == dim()) {
-      sketch_.recenter(mean_ - sketch_center_);
+    const Eigen::VectorXd scale = metric_scale_();
+    if (opts_.position_sketch_direction) {
+      position_sketch_.refresh(scale, opts_.sketch_max_rank,
+                               opts_.sketch_eigenvalue_cutoff);
     }
-
-    Eigen::MatrixXd basis;
-    mixture_sketch_ready_ = sketch_.factor(basis, opts_.sketch_max_rank);
-    ++sketch_rebuilds_;
-    if (mixture_sketch_ready_) {
-      mixture_sketch_basis_ = basis;
-      sketch_rank_ = mixture_sketch_basis_.cols();
-      (void) build_scaled_component_(mixture_sketch_basis_,
-                                     mixture_sketch_scaled_,
-                                     mixture_sketch_residual_);
-
-      {
-        Eigen::HouseholderQR<Eigen::MatrixXd> qr(mixture_sketch_basis_);
-        const Eigen::MatrixXd Qn =
-          qr.householderQ() * Eigen::MatrixXd::Identity(
-            mixture_sketch_basis_.rows(), mixture_sketch_basis_.cols());
-        if (sketch_prev_basis_.size() > 0 &&
-            sketch_prev_basis_.rows() == Qn.rows()) {
-          const double denom = static_cast<double>(
-            std::min(sketch_prev_basis_.cols(), Qn.cols()));
-          const double overlap =
-            (sketch_prev_basis_.transpose() * Qn).squaredNorm() /
-            std::max(denom, 1.0);
-          if (std::isfinite(overlap)) {
-            sketch_persistence_total_ += overlap;
-            ++sketch_persistence_count_;
-          }
-        }
-        sketch_prev_basis_ = Qn;
-      }
-    } else {
-      sketch_rank_ = 0;
-      ++sketch_dropouts_;
+    if (opts_.curvature_sketch_direction) {
+      refresh_curvature_direction_(scale);
     }
-    sketch_rank_total_ += static_cast<std::size_t>(sketch_rank_);
-
-    // The Hessian metric owns eigvecs_/eigvals_; as a mixture component it
-    // needs a square root, which is just the basis scaled by the root of its
-    // weights. refresh_hessian_metric_ ran before this at the window close,
-    // and it self-limits to hessian_max_refreshes, after which the basis is
-    // simply held.
-    if (hess_gate_open_() && hessian_refreshes_ > 0 && opts_.J > 0) {
-      const Eigen::VectorXd w = eigvals_.head(opts_.J).cwiseMax(0.0);
-      Eigen::MatrixXd hb = eigvecs_.leftCols(opts_.J);
-      for (Eigen::Index j = 0; j < opts_.J; ++j) {
-        hb.col(j) *= std::sqrt(w(j));
-      }
-      if (hb.allFinite()) {
-        mixture_hess_basis_ = std::move(hb);
-        mixture_hess_ready_ = true;
-      }
-    } else {
-      mixture_hess_ready_ = false;
-    }
-
-    // The sketch is centered on the outgoing mean, which has just moved,
-    // and whitened by a scale that moved with it.
-    sketch_.reset();
-    sketch_center_ = mean_;
     refresh_mixture_weights_();
   }
 
-  // Pool both generators' pairs and fit diag(psi) + V V' to them.
-  //
-  // Runs at the window close, against the scale the window's draws were
-  // whitened by -- not the scale that has just been recomputed, which the
-  // pairs know nothing about.
-  // Before the first reading the behaviour is set by
-  // anisotropy_gate_fail_open; after it, the statistic decides.
-  bool hess_gate_open_() const {
-    if (!(opts_.hess_gate_native_threshold > 0.0)) {
-      return true;
+  void refresh_curvature_direction_(
+      const Eigen::Ref<const Eigen::VectorXd>& metric_scale) {
+    Eigen::VectorXd gradient(dim());
+    Eigen::VectorXd flat_hessian(dim() * dim());
+    double value = 0.0;
+    bsm_.log_density_gradient_hessian_noe(
+      theta_, value, gradient, flat_hessian);
+    ++nfev_;
+
+    Eigen::MatrixXd negative_hessian = Eigen::MatrixXd::Constant(
+      dim(), dim(), std::numeric_limits<double>::quiet_NaN());
+    if (std::isfinite(value) && gradient.allFinite() &&
+        flat_hessian.allFinite()) {
+      const Eigen::Map<const Eigen::MatrixXd> log_density_hessian(
+        flat_hessian.data(), dim(), dim());
+      negative_hessian = -log_density_hessian;
     }
-    if (hess_signal_count_ == 0) {
-      return opts_.anisotropy_gate_fail_open;
-    }
-    return hess_anisotropy() > opts_.hess_gate_native_threshold;
+    curvature_direction_.refresh(
+      negative_hessian, metric_scale, opts_.curvature_max_rank,
+      opts_.sketch_eigenvalue_cutoff);
   }
 
-  // Rescale a low-rank factor so its marginals match the adapted diagonal,
-  // and set aside the complementary residual. Applies to any component that
-  // supplies a D-by-r factor.
-  //
-  // Two effects, worth separating. The draw becomes full rank, so successive
-  // draws are not confined to the same r-dimensional subspace -- that
-  // confinement is what the lag curves exposed, a real gain at lag 1 decaying
-  // to a deficit by lag 200. And the marginals become exactly cov whatever the
-  // component's own eigenvalues say, so only its *directions* matter. For the
-  // sketch that is unambiguously right, its magnitudes being noise at ESS/D
-  // below one, and it is applied there and nowhere else. HESS deliberately
-  // keeps its own magnitudes: a curvature metric's whole content is that some
-  // directions are far wider than the diagonal believes, and imposing cov
-  // discards exactly that -- measured at 40.7x the diagonal sampler's lag-1
-  // displacement unscaled against 1.02x scaled on ar1.
-  //
-  // The residual needs no floor: it is (1-beta) cov identically where the
-  // scaling is unclamped and larger where clamped, so it stays positive and
-  // the marginals stay exact.
-  bool build_scaled_component_(const Eigen::MatrixXd& basis,
-                               Eigen::MatrixXd& scaled,
-                               Eigen::VectorXd& residual) {
-    if (basis.size() == 0 || basis.rows() != dim()) {
-      residual.resize(0);
-      return false;
-    }
-    const Eigen::VectorXd& var = diagonal_variance_();
-    const Eigen::VectorXd bb = basis.array().square().rowwise().sum();
-    // trace(BB') is the variance the subspace carries; var.sum() is the total.
-    const double total = var.sum();
-    cov_explained_raw_ = total > opts_.tol ? bb.sum() / total : 0.0;
-    const double beta = total > opts_.tol
-      ? std::clamp(cov_explained_raw_, 0.0, 1.0) : 0.0;
-    mixture_cov_beta_used_ = beta;
-    const double guard = std::max(opts_.tol, 1e-8 * bb.maxCoeff());
-
-    Eigen::VectorXd scale(var.size());
-    for (Eigen::Index d = 0; d < var.size(); ++d) {
-      scale(d) = std::sqrt(beta * var(d) / std::max(bb(d), guard));
-    }
-    scaled = scale.asDiagonal() * basis;
-    const Eigen::VectorXd contribution =
-      scaled.array().square().rowwise().sum();
-    residual = (var - contribution).cwiseMax(opts_.tol);
-    if (!residual.allFinite() || !scaled.allFinite()) {
-      residual.resize(0);
-      return false;
-    }
-    return true;
+  Eigen::VectorXd position_direction_noise_() {
+    return metric_scale_().cwiseProduct(
+      position_sketch_.transform(normal_rng_(dim()),
+                                 normal_rng_(position_sketch_.rank()),
+                                 opts_.sketch_residual_fraction));
   }
 
-  Eigen::VectorXd scaled_additive_draw_(const Eigen::MatrixXd& scaled,
-                                        const Eigen::VectorXd& residual) {
-    Eigen::VectorXd d =
-      residual.array().sqrt().matrix().cwiseProduct(normal_rng_(dim()));
-    d += scaled * normal_rng_(scaled.cols());
-    return d;
+  Eigen::VectorXd curvature_direction_noise_() {
+    return metric_scale_().cwiseProduct(
+      curvature_direction_.transform(
+        normal_rng_(curvature_direction_.rank())));
   }
 
   void reset_mixture_() {
-    mixture_sketch_ready_ = false;
-    mixture_hess_ready_ = false;
-    mixture_sketch_residual_.resize(0);
+    position_sketch_.reset();
+    curvature_direction_.reset();
     for (int c = 0; c < kComponents; ++c) {
       mixture_logw_[c] = mixture_prior_(c);
     }
     blocks_.clear();
     bandit_updates_ = 0;
     last_component_ = kDiag;
-    sketch_center_ = mean_;
-    sketch_prev_basis_.resize(0, 0);
-    sketch_persistence_total_ = 0.0;
-    sketch_persistence_count_ = 0;
-    sketch_rank_ = 0;
-    sketch_rebuilds_ = 0;
-    sketch_rank_total_ = 0;
-    sketch_dropouts_ = 0;
     refresh_mixture_weights_();
   }
 
@@ -1873,7 +1286,6 @@ protected:
   // The center OnlinePCA's states are taken relative to; see
   void reset_basis_estimator_() {
     online_pca_.reset();
-    sketch_.reset();
   }
 
   void reset_pca_estimator_() {
@@ -1970,10 +1382,6 @@ protected:
     if (handoff.rollback) {
       reset_adaptation_to_defaults_(true);
       seed_mean_from_handoff_(handoff);
-      // The sketch accumulates theta - mean_, so its centre has to follow the
-      // seeded mean. reset_mixture_() ran inside the reset above, before the
-      // mean was seeded, and left it pointing at the pre-handoff value.
-      sketch_center_ = mean_;
       initialize_K_window_metric_(false);
       return;
     }
@@ -1995,12 +1403,6 @@ protected:
       projection_basis_ready_ = false;
     }
     reset_basis_estimator_();
-    // The sketch restarts here against the handoff mean. Leaving its centre at
-    // the construction-time mean would make the first window's recenter()
-    // subtract the wrong rank-one term -- on a badly scaled posterior, one
-    // built from the distance between the initial point and the transport's
-    // landing site, which can dwarf the window's own scatter.
-    sketch_center_ = mean_;
     initialize_K_window_metric_(false);
   }
 
@@ -2022,23 +1424,11 @@ protected:
 
     online_moments_.update(theta);
     if (opts_.mixture_direction) {
-      // Centered, not whitened, and fed regardless of the rank-J calibration
-      // schedule, which it does not participate in.
-      //
-      // An earlier comment here claimed these states were whitened, on the
-      // argument that a raw sketch on a badly scaled target is dominated by
-      // the largest-variance coordinates -- information the diagonal component
-      // already holds -- so whitening is what leaves only correlation behind.
-      // The argument was for a spectral shrinkage step that has since been
-      // measured not to work and removed (see Sketch::factor). What replaced
-      // it does the same job downstream instead: build_scaled_component_
-      // rescales the basis so its marginals match the adapted diagonal, which
-      // discards the sketch's own magnitudes and keeps only its directions.
-      //
-      // Feeding centered states is also what makes cov_explained_raw_ =
-      // trace(BB')/trace(cov) a meaningful ratio bounded by one. Whiten here
-      // and that reads as a rank rather than a fraction.
-      sketch_.update(theta - mean_);
+      // Position accumulation is streaming. Curvature instead probes the
+      // local score operator only when this window closes below.
+      if (opts_.position_sketch_direction) {
+        position_sketch_.update(theta);
+      }
     } else if (pca_calibration_enabled_) {
       update_projected_moments_(theta);
       if (!pca_frozen_) {
@@ -2051,8 +1441,6 @@ protected:
       set_covariance_(online_moments_.variance());
       online_moments_.reset();
 
-      // Refresh the Hessian metric against the updated diagonal.
-      (void) refresh_hessian_metric_();
       // Slow parameters change only here; the bandit's block is closed too,
       // since its rewards were measured against the outgoing diagonal.
       if (opts_.mixture_direction) {
