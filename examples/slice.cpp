@@ -15,12 +15,14 @@ int main(int argc, char** argv) {
   std::uint64_t seed = 0;
   std::size_t warmup = 15'000;
   std::size_t iterations = 30'000;
-  std::string model_name = "earnings";
+  std::string model_name = "normal";
   std::string model_library;
   std::string data_file;
-  double initial_width = 1.0;
-  std::size_t max_steps_out = 100;
-  std::size_t max_shrink_steps = 1'000;
+  double initial_width = klhr::SliceOptions{}.initial_width;
+  std::size_t max_steps_out = klhr::SliceOptions{}.max_steps_out;
+  std::size_t max_shrink_steps = klhr::SliceOptions{}.max_shrink_steps;
+  double min_width = klhr::SliceOptions{}.min_width;
+  double max_width = klhr::SliceOptions{}.max_width;
 
   CLI::App app{"Run random-direction slice sampling."};
   app.add_option("--seed", seed, "Random seed (0 => random)")
@@ -39,15 +41,24 @@ int main(int argc, char** argv) {
                  "Explicit Stan model library path");
   app.add_option("--data", data_file, "Explicit Stan data JSON path");
   app.add_option("--initial-width", initial_width,
-                 "Slice bracket width multiplier")
-    ->default_val(initial_width);
-  app.add_option("--max-steps-out", max_steps_out,
-                 "Maximum stepping-out intervals")
-    ->default_val(max_steps_out)
+                 "Slice step size w, scaled by the metric (Neal: 1)")
+    ->default_val(initial_width)
     ->check(CLI::PositiveNumber);
+  app.add_option("--max-steps-out", max_steps_out,
+                 "Stepping-out limit m, 0 = unlimited (Neal: 0)")
+    ->default_val(max_steps_out)
+    ->check(CLI::NonNegativeNumber);
   app.add_option("--max-shrink-steps", max_shrink_steps,
-                 "Maximum shrinkage proposals")
+                 "Shrinkage limit, 0 = unlimited (Neal: 0)")
     ->default_val(max_shrink_steps)
+    ->check(CLI::NonNegativeNumber);
+  app.add_option("--min-width", min_width,
+                 "Floor on the metric-scaled slice width")
+    ->default_val(min_width)
+    ->check(CLI::PositiveNumber);
+  app.add_option("--max-width", max_width,
+                 "Cap on the metric-scaled slice width")
+    ->default_val(max_width)
     ->check(CLI::PositiveNumber);
   CLI11_PARSE(app, argc, argv);
 
@@ -61,6 +72,8 @@ int main(int argc, char** argv) {
     .initial_width = initial_width,
     .max_steps_out = max_steps_out,
     .max_shrink_steps = max_shrink_steps,
+    .min_width = min_width,
+    .max_width = max_width,
   };
   klhr::Slice sampler(model, data, options);
 

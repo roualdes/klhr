@@ -34,7 +34,6 @@ COPY stan/*.stan /app/klhr/stan/
 
 RUN make \
         -C /app/bridgestan \
-        BRIDGESTAN_AD_HESSIAN=true \
         -j"${BUILD_JOBS}" \
         /app/klhr/stan/normal_model.so \
         /app/klhr/stan/garch_model.so \

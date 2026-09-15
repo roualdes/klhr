@@ -83,12 +83,10 @@ protected:
         return;
       }
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
-      grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
       line_grad = grad_logp.dot(rho);
       // Covers everything KL_ consumes: only the projection of grad_logp on
       // rho enters the objective, and a NaN or infinity anywhere in the vector
-      // reaches line_grad. See the matching note in NormalKLHR::KL_, including
-      // the caveat that a finite grad_clip masks an infinite gradient here.
+      // reaches line_grad. See the matching note in NormalKLHR::KL_.
       if (!std::isfinite(logp) || !std::isfinite(line_grad)) {
         set_bad_kl_(eta, value, grad);
         return;

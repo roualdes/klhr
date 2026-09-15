@@ -71,20 +71,13 @@ protected:
         return;
       }
       bsm_.log_density_gradient_noe(xi, logp, grad_logp);
-      grad_logp = grad_logp.array().min(opts_.grad_clip).max(-opts_.grad_clip);
       w_grad_rho = wn * grad_logp.dot(rho);
-      // This covers everything KL_ consumes. The only part of grad_logp that
-      // reaches the objective is its projection on rho, and a NaN or an
-      // infinity anywhere in the vector reaches w_grad_rho: Eigen's min/max
-      // propagate NaN in this argument order, and an infinite component either
-      // survives the dot product or meets a zero rho_d and turns it NaN. There
-      // is deliberately no componentwise check, because a garbage component
+      // This covers everything KL_ consumes. Only the projection of grad_logp
+      // on rho reaches the objective, and a NaN or an infinity anywhere in the
+      // vector reaches w_grad_rho: an infinite component either survives the
+      // dot product or meets a zero rho_d and turns it NaN. There is
+      // deliberately no componentwise check, because a garbage component
       // orthogonal to rho cannot affect the fit.
-      //
-      // One caveat, and it belongs to the clip rather than to the check: with
-      // a finite grad_clip an infinite gradient is clipped to +/-grad_clip
-      // *before* this line, so the point then looks feasible. The default
-      // grad_clip is infinite, which leaves infinities intact.
       if (!std::isfinite(logp) || !std::isfinite(w_grad_rho)) {
         set_bad_kl_(eta, value, grad);
         return;

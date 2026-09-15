@@ -1,10 +1,9 @@
-// The KL objectives are evaluated by Gauss-Hermite (normal reference) and
-// Gauss-Laguerre (Weibull reference) quadrature. A wrong node or weight
-// silently biases every line fit, so check both rules against moments with
-// known values, and check the rescaling the samplers apply on top.
+// The KL objectives are evaluated by Gauss-Hermite (normal reference)
+// quadrature. A wrong node or weight silently biases every line fit, so check
+// the rule against moments with known values, and check the rescaling the
+// samplers apply on top.
 
 #include "gausshermite.hpp"
-#include "gausslaguerre.hpp"
 
 #include <Eigen/Dense>
 
@@ -72,28 +71,6 @@ void test_gauss_hermite_normal_moments() {
   }
 }
 
-// Gauss-Laguerre integrates against exp(-x) on (0, inf): E[X^k] = k! for
-// X ~ Exponential(1).
-void test_gauss_laguerre_exponential_moments() {
-  for (const Eigen::Index n : {2, 4, 8, 16}) {
-    Eigen::VectorXd w;
-    Eigen::VectorXd x;
-    klhr::gauss_laguerre(n, w, x);
-    CHECK(w.size() == n);
-    CHECK(x.size() == n);
-    CHECK((x.array() > 0.0).all());
-
-    CLOSE(w.sum(), 1.0, 1e-12);
-    CLOSE(w.dot(x), 1.0, 1e-10);
-    CLOSE(w.dot(x.cwiseProduct(x)), 2.0, 1e-9);
-    if (n >= 4) {
-      const Eigen::VectorXd x3 =
-        (x.array() * x.array() * x.array()).matrix();
-      CLOSE(w.dot(x3), 6.0, 1e-7);
-    }
-  }
-}
-
 // gauss_hermite must size its outputs itself; callers that pass empty
 // vectors previously wrote out of bounds.
 void test_outputs_are_resized() {
@@ -125,7 +102,6 @@ void test_nodes_are_symmetric() {
 
 int main() {
   test_gauss_hermite_normal_moments();
-  test_gauss_laguerre_exponential_moments();
   test_outputs_are_resized();
   test_nodes_are_symmetric();
   return failures == 0 ? 0 : 1;
