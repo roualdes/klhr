@@ -1,173 +1,98 @@
 [
-  {
-    "model_name": "normal",
-    "sampler": "stan",
-    "replications": 1,
-    "seed": 0,
-    "iterations": 500000,
-    "warmup": 250000,
-    "target_accept": 0.95
-  },
-  {
-    "model_name": "ill-normal",
-    "sampler": "stan",
-    "replications": 1,
-    "seed": 0,
-    "iterations": 500000,
-    "warmup": 250000,
-    "target_accept": 0.95
-  },
-  {
-    "model_name": "funnel",
-    "sampler": "stan",
-    "replications": 1,
-    "seed": 0,
-    "iterations": 500000,
-    "warmup": 250000,
-    "target_accept": 0.95
-  },
-  {
-    "model_name": "normal",
-    "sampler": "normal",
-    "replications": 20,
-    "seed": 1301,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "normal",
-    "sampler": "sas",
-    "replications": 20,
-    "seed": 1301,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "normal",
-    "sampler": "slice",
-    "replications": 20,
-    "seed": 1301,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "normal",
-    "sampler": "barker",
-    "replications": 20,
-    "seed": 1301,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "normal",
-    "sampler": "mala",
-    "replications": 20,
-    "seed": 1301,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "normal",
-    "sampler": "stan",
-    "replications": 20,
-    "seed": 1301,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "ill-normal",
-    "sampler": "normal",
-    "replications": 20,
-    "seed": 3974,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "ill-normal",
-    "sampler": "sas",
-    "replications": 20,
-    "seed": 3974,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "ill-normal",
-    "sampler": "slice",
-    "replications": 20,
-    "seed": 3974,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "ill-normal",
-    "sampler": "barker",
-    "replications": 20,
-    "seed": 3974,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "ill-normal",
-    "sampler": "mala",
-    "replications": 20,
-    "seed": 3974,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "ill-normal",
-    "sampler": "stan",
-    "replications": 20,
-    "seed": 3974,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "funnel",
-    "sampler": "normal",
-    "replications": 20,
-    "seed": 89,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "funnel",
-    "sampler": "sas",
-    "replications": 20,
-    "seed": 89,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "funnel",
-    "sampler": "slice",
-    "replications": 20,
-    "seed": 89,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "funnel",
-    "sampler": "barker",
-    "replications": 20,
-    "seed": 89,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "funnel",
-    "sampler": "mala",
-    "replications": 20,
-    "seed": 89,
-    "iterations": 4000,
-    "warmup": 2000
-  },
-  {
-    "model_name": "funnel",
-    "sampler": "stan",
-    "replications": 20,
-    "seed": 89,
-    "iterations": 4000,
-    "warmup": 2000
-  }
+   {
+      "iterations": 10000000,
+      "model_name": "funnel",
+      "replications": 20,
+      "sampler": "sas",
+      "seed": 530,
+      "warmup": 100000
+   },
+   {
+      "iterations": 10000000,
+      "model_name": "funnel",
+      "replications": 20,
+      "sampler": "normal",
+      "seed": 530,
+      "warmup": 100000
+   },
+   {
+      "iterations": 10000000,
+      "model_name": "funnel",
+      "replications": 20,
+      "sampler": "stan",
+      "seed": 530,
+      "warmup": 100000
+   },
+   {
+      "iterations": 10000000,
+      "model_name": "funnel",
+      "replications": 20,
+      "sampler": "slice",
+      "seed": 530,
+      "warmup": 100000
+   },
+   {
+      "iterations": 100000,
+      "model_name": "ill-normal",
+      "replications": 20,
+      "sampler": "sas",
+      "seed": 898,
+      "warmup": 50000
+   },
+   {
+      "iterations": 100000,
+      "model_name": "ill-normal",
+      "replications": 20,
+      "sampler": "normal",
+      "seed": 898,
+      "warmup": 50000
+   },
+   {
+      "iterations": 100000,
+      "model_name": "ill-normal",
+      "replications": 20,
+      "sampler": "stan",
+      "seed": 898,
+      "warmup": 50000
+   },
+   {
+      "iterations": 100000,
+      "model_name": "ill-normal",
+      "replications": 20,
+      "sampler": "slice",
+      "seed": 898,
+      "warmup": 50000
+   },
+   {
+      "iterations": 100000,
+      "model_name": "normal",
+      "replications": 20,
+      "sampler": "sas",
+      "seed": 204,
+      "warmup": 50000
+   },
+   {
+      "iterations": 100000,
+      "model_name": "normal",
+      "replications": 20,
+      "sampler": "normal",
+      "seed": 204,
+      "warmup": 50000
+   },
+   {
+      "iterations": 100000,
+      "model_name": "normal",
+      "replications": 20,
+      "sampler": "stan",
+      "seed": 204,
+      "warmup": 50000
+   },
+   {
+      "iterations": 100000,
+      "model_name": "normal",
+      "replications": 20,
+      "sampler": "slice",
+      "seed": 204,
+      "warmup": 50000
+   }
 ]
