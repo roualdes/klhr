@@ -21,6 +21,7 @@
       "replications": 20,
       "sampler": "stan",
       "seed": 530,
+      "target_accept": 0.94999999999999996,
       "warmup": 100000
    },
    {

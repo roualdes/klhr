@@ -25,7 +25,9 @@ local normal = {
 local samplers = ["sas", "normal", "stan", "slice"];
 
 [
-  model + { sampler: s }
+  model
+  + { sampler: s }
+  + (if s == "stan" && model == funnel then { target_accept: 0.95 } else {})
   for model in [funnel, illnormal, normal]
   for s in samplers
 ]
